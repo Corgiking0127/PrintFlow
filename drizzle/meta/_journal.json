@@ -15,6 +15,13 @@
       "when": 1787923533126,
       "tag": "0001_glorious_grey_gargoyle",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787925223834,
+      "tag": "0002_vengeful_tenebrous",
+      "breakpoints": true
     }
   ]
 }

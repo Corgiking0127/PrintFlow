@@ -11,6 +11,73 @@ function matchMeta(html: string, key: string) {
   return patterns.map((pattern) => html.match(pattern)?.[1]).find(Boolean) || "";
 }
 
+type MakerWorldPlate = {
+  index?: number;
+  name?: string;
+  prediction?: number;
+  filaments?: Array<{ type?: string; color?: string }>;
+};
+
+type MakerWorldModelInfo = {
+  compatibility?: { devProductName?: string };
+  plates?: MakerWorldPlate[];
+};
+
+type MakerWorldInstance = {
+  profileId?: number;
+  title?: string;
+  extention?: {
+    modelInfo?: MakerWorldModelInfo;
+    otherCompatibilityModelInfo?: Array<{ profileId?: number; modelInfo?: MakerWorldModelInfo }>;
+  };
+};
+
+async function readStructuredProject(target: URL) {
+  const designId = target.pathname.match(/\/models\/(\d+)/)?.[1];
+  if (!designId) return null;
+  const response = await fetch(`https://api.bambulab.com/v1/design-service/design/${designId}`, {
+    headers: { Accept: "application/json", "User-Agent": "PrintFlow/1.1" },
+  });
+  if (!response.ok) return null;
+  const design = await response.json() as { title?: string; instances?: MakerWorldInstance[] };
+  const profiles = (design.instances || []).flatMap((instance) => {
+    const primary = instance.extention?.modelInfo ? [{
+      profileId: instance.profileId,
+      title: instance.title || "默认打印配置",
+      printer: instance.extention.modelInfo.compatibility?.devProductName || "默认设备",
+      modelInfo: instance.extention.modelInfo,
+    }] : [];
+    const compatible = (instance.extention?.otherCompatibilityModelInfo || []).map((profile) => ({
+      profileId: profile.profileId,
+      title: instance.title || "兼容打印配置",
+      printer: profile.modelInfo?.compatibility?.devProductName || "兼容设备",
+      modelInfo: profile.modelInfo,
+    }));
+    return [...primary, ...compatible];
+  });
+  const requestedProfileId = Number(target.hash.match(/profileId-(\d+)/i)?.[1] || target.searchParams.get("profileId") || 0);
+  const selected = profiles.find((profile) => profile.profileId === requestedProfileId) || profiles[0];
+  const plates = (selected?.modelInfo?.plates || []).filter((plate) => Number(plate.prediction) > 0);
+  if (!design.title || !plates.length) return null;
+  const plateDurations = plates.map((plate) => Math.max(1, Math.ceil(Number(plate.prediction) / 60)));
+  const plateNames = plates.map((plate, index) => plate.name?.trim() || `打印盘 ${plate.index || index + 1}`);
+  const material = plates.flatMap((plate) => plate.filaments || []).find((filament) => filament.type)?.type || "PLA";
+  return {
+    project: {
+      name: design.title,
+      sourceUrl: target.toString(),
+      plates: plates.length,
+      durationMinutes: plateDurations.reduce((sum, minutes) => sum + minutes, 0),
+      plateDurations,
+      plateNames,
+      splitByPlate: plates.length > 1,
+      material,
+      color: "自然色",
+    },
+    profile: { id: selected?.profileId || null, printer: selected?.printer || "默认设备", title: selected?.title || "默认打印配置" },
+  };
+}
+
 export async function POST(request: Request) {
   try {
     const { url } = (await request.json()) as { url?: string };
@@ -18,6 +85,15 @@ export async function POST(request: Request) {
     const target = new URL(url);
     if (!/(^|\.)makerworld\.com$/i.test(target.hostname)) {
       return Response.json({ error: "目前仅支持 makerworld.com 链接" }, { status: 400 });
+    }
+
+    const structured = await readStructuredProject(target).catch(() => null);
+    if (structured) {
+      return Response.json({
+        ...structured,
+        confidence: { name: "high", plates: "high", duration: "high", perPlate: "high" },
+        note: `已读取 ${structured.project.plates} 个打印盘的独立时长；可选择整项目排产或拆分到每盘。`,
+      });
     }
 
     const response = await fetch(target.toString(), {
@@ -68,9 +144,9 @@ export async function POST(request: Request) {
     if (!durationMinutes) durationMinutes = minuteMatches.find((value) => value > 0 && value < 30000) || 60;
 
     return Response.json({
-      project: { name, sourceUrl: target.toString(), plates, durationMinutes, material: "PLA", color: "自然色" },
-      confidence: { name: "high", plates: plateMatches.length ? "medium" : "low", duration: hourMatches.length || minuteMatches.length ? "medium" : "low" },
-      note: "MakerWorld 可能包含多个打印配置，请在录入前确认系统选中的盘数与总时长。",
+      project: { name, sourceUrl: target.toString(), plates, durationMinutes, plateDurations: [], plateNames: [], splitByPlate: false, material: "PLA", color: "自然色" },
+      confidence: { name: "high", plates: plateMatches.length ? "medium" : "low", duration: hourMatches.length || minuteMatches.length ? "medium" : "low", perPlate: "low" },
+      note: "该配置未返回逐盘数据，将按整项目排产；你也可以手动填写每盘时间。",
     });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "无法读取该页面" }, { status: 502 });

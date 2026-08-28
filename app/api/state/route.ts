@@ -24,6 +24,9 @@ async function ensureSchema() {
       source_url TEXT NOT NULL DEFAULT '',
       plates INTEGER NOT NULL DEFAULT 1,
       duration_minutes INTEGER NOT NULL DEFAULT 60,
+      plate_durations TEXT NOT NULL DEFAULT '[]',
+      plate_names TEXT NOT NULL DEFAULT '[]',
+      split_by_plate INTEGER NOT NULL DEFAULT 0,
       urgent INTEGER NOT NULL DEFAULT 0,
       deadline TEXT,
       material TEXT NOT NULL DEFAULT 'PLA',
@@ -46,6 +49,14 @@ async function ensureSchema() {
     d1.prepare("CREATE INDEX IF NOT EXISTS idx_projects_status_deadline ON projects(status, deadline)"),
     d1.prepare("CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at)"),
   ]);
+  const columns = await d1.prepare("PRAGMA table_info(projects)").all<{ name: string }>();
+  const columnNames = new Set((columns.results || []).map((column) => column.name));
+  const additions = [
+    !columnNames.has("plate_durations") ? d1.prepare("ALTER TABLE projects ADD COLUMN plate_durations TEXT NOT NULL DEFAULT '[]'") : null,
+    !columnNames.has("plate_names") ? d1.prepare("ALTER TABLE projects ADD COLUMN plate_names TEXT NOT NULL DEFAULT '[]'") : null,
+    !columnNames.has("split_by_plate") ? d1.prepare("ALTER TABLE projects ADD COLUMN split_by_plate INTEGER NOT NULL DEFAULT 0") : null,
+  ].filter((statement): statement is D1PreparedStatement => Boolean(statement));
+  if (additions.length) await d1.batch(additions);
 }
 
 export async function GET() {
@@ -81,6 +92,9 @@ export async function POST(request: Request) {
           sourceUrl: project.sourceUrl ?? "",
           plates: project.plates ?? 1,
           durationMinutes: project.durationMinutes ?? 60,
+          plateDurations: project.plateDurations ?? [],
+          plateNames: project.plateNames ?? [],
+          splitByPlate: project.splitByPlate ?? false,
           urgent: project.urgent ?? false,
           deadline: project.deadline ?? null,
           material: project.material ?? "PLA",

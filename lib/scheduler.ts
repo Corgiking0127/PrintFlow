@@ -4,6 +4,9 @@ export type Project = {
   sourceUrl: string;
   plates: number;
   durationMinutes: number;
+  plateDurations?: number[];
+  plateNames?: string[];
+  splitByPlate?: boolean;
   urgent: boolean;
   deadline: string | null;
   material: string;
@@ -30,6 +33,8 @@ export type ScheduledPlate = {
   projectName: string;
   plate: number;
   plateCount: number;
+  plateName: string;
+  planningUnit: "project" | "plate";
   durationMinutes: number;
   start: Date;
   end: Date;
@@ -95,8 +100,17 @@ export function buildSchedule(projects: Project[], settings: ScheduleSettings, s
     .filter((project) => project.status !== "complete")
     .flatMap((project) => {
       const plateCount = Math.max(1, project.plates);
-      const duration = Math.max(15, Math.ceil(project.durationMinutes / plateCount));
-      return Array.from({ length: plateCount }, (_, index) => ({ project, plate: index + 1, duration }));
+      if (!project.splitByPlate) {
+        return [{ project, plate: 0, plateName: "整项目", duration: Math.max(15, project.durationMinutes), planningUnit: "project" as const }];
+      }
+      const average = Math.max(15, Math.ceil(project.durationMinutes / plateCount));
+      return Array.from({ length: plateCount }, (_, index) => ({
+        project,
+        plate: index + 1,
+        plateName: project.plateNames?.[index] || `打印盘 ${index + 1}`,
+        duration: Math.max(15, project.plateDurations?.[index] || average),
+        planningUnit: "plate" as const,
+      }));
     });
 
   const scheduled: ScheduledPlate[] = [];
@@ -120,11 +134,13 @@ export function buildSchedule(projects: Project[], settings: ScheduleSettings, s
     pending.splice(chosen.index, 1);
     const night = cursor.getHours() >= 18 || cursor.getHours() < 7;
     scheduled.push({
-      id: `${chosen.project.id}-${chosen.plate}`,
+      id: `${chosen.project.id}-${chosen.planningUnit === "project" ? "project" : chosen.plate}`,
       projectId: chosen.project.id,
       projectName: chosen.project.name,
       plate: chosen.plate,
       plateCount: chosen.project.plates,
+      plateName: chosen.plateName,
+      planningUnit: chosen.planningUnit,
       durationMinutes: chosen.duration,
       start: new Date(cursor),
       end: chosen.end,
