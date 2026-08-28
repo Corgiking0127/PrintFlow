@@ -10,6 +10,7 @@ PrintFlow 的推荐生产方式是把网页、API、D1 数据库和 X2D 云端 M
 - 国际区账号可访问 `api.bambulab.com:443` 和 `us.mqtt.bambulab.com:8883`
 - 中国区账号可访问 `api.bambulab.cn:443` 和 `cn.mqtt.bambulab.com:8883`
 - 主机可以通过 HTTPS `443` 访问 MakerWorld 与 Bark
+- 局域网防火墙允许客户端访问 TCP `8082`
 - 不需要开放任何公网入站端口
 
 PrintFlow 主机不需要与打印机位于同一局域网，也不需要固定打印机 IP。
@@ -25,7 +26,7 @@ npm test
 npm run local
 ```
 
-打开 `http://localhost:8082`。第一次启动时项目和打印机列表为空。
+启动日志会列出可用的局域网地址，例如 `http://192.168.1.50:8082`。在同一局域网的电脑或手机打开该地址；第一次启动时项目和打印机列表为空。
 
 ### 连接拓竹云端 MQTT
 
@@ -41,15 +42,14 @@ npm run local
 
 | 项目 | 默认值 | 说明 |
 | --- | --- | --- |
-| 网页/API | `127.0.0.1:8082` | 仅本机访问，浏览器使用 `http://localhost:8082` |
-| Adapter 控制接口 | `127.0.0.1:8790` | 仅本机网页可配置 |
+| PrintFlow 一体服务 | `0.0.0.0:8082` | 网页、API 与 Adapter 共用的局域网入口 |
 | 拓竹云端 MQTT | `us.mqtt.bambulab.com:8883` 或 `cn.mqtt.bambulab.com:8883` | Adapter 主动连接云端 |
 | 本地数据 | `.data/` | D1、Wrangler 状态与 Adapter 配置 |
 
-可通过环境变量修改网页和 Adapter 端口：
+可通过环境变量修改监听地址和端口：
 
 ```bash
-PRINTFLOW_WEB_PORT=8082 PRINTFLOW_ADAPTER_PORT=8790 npm run local:start
+PRINTFLOW_WEB_IP=0.0.0.0 PRINTFLOW_WEB_PORT=8082 npm run local:start
 ```
 
 ## 4. 使用 systemd 常驻运行
@@ -87,7 +87,7 @@ RestartSec=5
 User=printflow
 Group=printflow
 Environment=PRINTFLOW_WEB_PORT=8082
-Environment=PRINTFLOW_ADAPTER_PORT=8790
+Environment=PRINTFLOW_WEB_IP=0.0.0.0
 
 [Install]
 WantedBy=multi-user.target
@@ -133,31 +133,19 @@ sudo systemctl start printflow
 
 `.data/printer-config.json` 包含拓竹 Access Token 和 PrintFlow 内部凭证，备份必须加密并限制访问。它不包含拓竹账号、密码或验证码。恢复时将 `.data/` 放回项目根目录，确认所有者为 `printflow:printflow` 后启动服务。
 
-## 7. Sites 页面与本地 Adapter
-
-仓库保留 OpenAI Sites + D1 部署。Sites 页面、本地地址或局域网地址都可以连接当前设备上运行的 Adapter，完成拓竹账号登录和云端 MQTT 配置。
-
-云端发布时：
-
-1. 运行 `npm run lint` 与 `npm test`。
-2. 使用 `.openai/hosting.json` 中的既有 Sites 项目。
-3. 保存并部署私有 Sites 版本。
-4. 在受信任的本机运行云端 MQTT Adapter。
-
-拓竹登录请求由浏览器直接交给当前设备上的 Adapter；Adapter 登录成功后保存 Access Token，并把打印机状态同步到当前 PrintFlow API。
-
-## 8. 阿里云边界
+## 7. 阿里云边界
 
 云端 MQTT 不要求服务器访问家庭或工作室局域网，因此 Adapter 可以运行在本机、NAS 或阿里云 ECS。若运行在远程服务器，必须使用专用账户、限制配置文件权限并加密备份，因为服务器会持有拓竹 Access Token。
 
 当前 API 数据层使用 Cloudflare D1。若要把完整网页/API 迁移到阿里云 ECS 的普通 Node.js 服务，需要先把 D1 驱动替换为 RDS PostgreSQL/MySQL，并调整 Worker 构建；当前本地一体模式不需要这项迁移。
 
-## 9. 故障排查
+## 8. 故障排查
 
 ### 页面显示“Adapter 离线”
 
 - 必须使用 `npm run local` 或 `npm run local:start`，而不是只运行 `npm run dev`。
-- 检查 `127.0.0.1:8790` 是否被其他程序占用。
+- 确认局域网地址使用的是 PrintFlow 服务器 IP，而不是访问设备的 IP。
+- 确认防火墙允许访问 TCP `8082`。
 
 ### Adapter 一直显示“正在连接”
 

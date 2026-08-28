@@ -4,6 +4,7 @@ import test from "node:test";
 import { buildConfiguration } from "../local/adapter-service.mjs";
 
 const localAdapter = readFileSync(new URL("../local/adapter-service.mjs", import.meta.url), "utf8");
+const localStart = readFileSync(new URL("../local/start.mjs", import.meta.url), "utf8");
 const standaloneAdapter = readFileSync(new URL("../public/printflow-x2d-bridge.mjs", import.meta.url), "utf8");
 const pageSource = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
 
@@ -22,9 +23,22 @@ test("printer settings no longer require LAN-only credentials", () => {
   assert.doesNotMatch(pageSource, /本地安全限制/);
   assert.doesNotMatch(pageSource, /仅限本地配置/);
   assert.doesNotMatch(pageSource, /adapter-note/);
+  assert.doesNotMatch(pageSource, /127\.0\.0\.1/);
+  assert.doesNotMatch(pageSource, /8790/);
+  assert.match(pageSource, /\/api\/adapter\/status/);
+  assert.match(pageSource, /\/api\/adapter\/configure/);
   assert.match(pageSource, /中国区支持注册手机号/);
   assert.match(pageSource, /手机号验证码登录可留空/);
   assert.match(pageSource, /Bambu Handy 可继续使用/);
+});
+
+test("LAN deployment exposes one same-origin PrintFlow service", () => {
+  assert.match(localStart, /PRINTFLOW_WEB_IP \|\| "0\.0\.0\.0"/);
+  assert.match(localStart, /\/api\/adapter\/status/);
+  assert.match(localStart, /\/api\/adapter\/configure/);
+  assert.match(localStart, /configureAdapter/);
+  assert.doesNotMatch(localAdapter, /createServer/);
+  assert.doesNotMatch(localAdapter, /PRINTFLOW_ADAPTER_PORT/);
 });
 
 test("standalone adapter also uses cloud credentials", () => {

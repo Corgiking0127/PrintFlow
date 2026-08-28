@@ -16,7 +16,7 @@ PrintFlow 是面向个人工作室的 3D 打印排产系统。它可以从 Maker
 - 读取 X2D + AMS 2 Pro 的打印进度、剩余时间、层数、双喷嘴温度、热床、腔温、Wi-Fi、AMS 槽位、余量和温湿度。
 - 使用适配器注册表隔离打印机协议；当前仅启用 `bambu-x2d-ams2pro`。
 
-## 本地一体架构
+## 局域网一体部署
 
 ```mermaid
 flowchart LR
@@ -31,7 +31,7 @@ flowchart LR
   Cloud -->|MQTT/TLS| Adapter
 ```
 
-MQTT Adapter 监听 `127.0.0.1:8790` 的配置接口。PrintFlow 网页可以从本地地址、局域网地址或 Sites 打开，并连接当前设备上的 Adapter 完成拓竹账号登录。
+网页、API、数据库和 MQTT Adapter 由同一个启动命令管理，对局域网只开放一个 `8082` 端口。浏览器始终调用当前 PrintFlow 地址下的同源 API，不会访问浏览器设备自身的 `127.0.0.1`。
 
 ## 快速开始
 
@@ -42,16 +42,15 @@ npm install
 npm run local
 ```
 
-打开：
+启动日志会显示局域网地址。在同一网络的电脑或手机上打开：
 
 ```text
-http://localhost:8082
+http://<PrintFlow服务器局域网IP>:8082
 ```
 
 `npm run local` 会先构建站点，再同时启动：
 
-- 本地网页与 API：`127.0.0.1:8082`
-- 本地 MQTT Adapter 控制接口：`127.0.0.1:8790`
+- 网页、API 与 MQTT Adapter：`0.0.0.0:8082`
 - 本地 D1 与打印机配置：`.data/`
 
 首次运行后，打开“打印机”页面，选择账号区域，填写拓竹账号和设备序列号。国际区通常使用邮箱；中国区可直接使用注册手机号。保存时网页会自动配置同机 Adapter。
@@ -84,7 +83,7 @@ npm run db:generate    # 数据库结构变化后生成迁移
 
 - 拓竹账号、密码以及短信或邮箱验证码不会保存到磁盘。
 - Access Token 保存在 `.data/printer-config.json`，文件权限限制为当前服务账户读写。
-- Token 不会写入网页数据库，也不会发送到 Sites；它仅用于连接拓竹 API 和 MQTT。
+- Token 不会写入网页数据库；它仅由一体服务用于连接拓竹 API 和 MQTT。
 - Token 通常约三个月有效，失效后需要在打印机页面重新登录。
 - `.data/`、`.env*`、本地 D1 和构建产物均不会提交到 Git。
 - Adapter 只订阅 `device/{serial}/report` 状态主题，不会向打印机发送控制指令。

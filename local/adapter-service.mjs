@@ -1,4 +1,3 @@
-import { createServer } from "node:http";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,7 +6,6 @@ import mqtt from "mqtt";
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dataDirectory = resolve(process.env.PRINTFLOW_LOCAL_DATA_DIR || resolve(projectRoot, ".data"));
 const configPath = resolve(dataDirectory, "printer-config.json");
-const controlPort = Number(process.env.PRINTFLOW_ADAPTER_PORT || 8790);
 
 const cloudRegions = {
   global: { label: "国际区", apiHost: "api.bambulab.com", mqttHost: "us.mqtt.bambulab.com" },
@@ -34,14 +32,14 @@ let lastForwardAt = null;
 let lastError = "";
 let forwardTimer = null;
 
-class VerificationRequiredError extends Error {
+export class VerificationRequiredError extends Error {
   constructor(message = "拓竹账号要求验证码，请查收短信或邮件后填写验证码") {
     super(message);
     this.name = "VerificationRequiredError";
   }
 }
 
-function publicStatus() {
+export function getAdapterStatus() {
   const region = configuration ? cloudRegions[configuration.region] : null;
   return {
     mode: "cloud-mqtt",
@@ -60,34 +58,6 @@ function publicStatus() {
       broker: region.mqttHost,
     } : null,
   };
-}
-
-function corsHeaders(origin) {
-  return {
-    "Access-Control-Allow-Origin": origin || "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Private-Network": "true",
-    "Cache-Control": "no-store",
-    "Content-Type": "application/json; charset=utf-8",
-    "Vary": "Origin",
-  };
-}
-
-function sendJson(response, status, body, origin = "") {
-  response.writeHead(status, corsHeaders(origin));
-  response.end(JSON.stringify(body));
-}
-
-async function readJson(request) {
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of request) {
-    size += chunk.length;
-    if (size > 65536) throw new Error("配置内容过大");
-    chunks.push(chunk);
-  }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
 function validateBaseConfiguration(input) {
@@ -225,6 +195,14 @@ async function saveConfiguration(next) {
   await chmod(configPath, 0o600);
 }
 
+export async function configureAdapter(input) {
+  const next = await buildConfiguration(input);
+  await saveConfiguration(next);
+  configuration = next;
+  connectPrinter(next);
+  return getAdapterStatus();
+}
+
 async function forwardLatest() {
   if (!latestPayload || !configuration || sending || Date.now() - lastSentAt < 4000) return;
   sending = true;
@@ -299,41 +277,15 @@ async function loadSavedConfiguration() {
   }
 }
 
-const server = createServer(async (request, response) => {
-  const origin = request.headers.origin || "";
-  if (request.method === "OPTIONS") return sendJson(response, 204, {}, origin);
-  const url = new URL(request.url || "/", `http://127.0.0.1:${controlPort}`);
-  if (request.method === "GET" && url.pathname === "/status") return sendJson(response, 200, publicStatus(), origin);
-  if (request.method === "POST" && url.pathname === "/configure") {
-    try {
-      const next = await buildConfiguration(await readJson(request));
-      await saveConfiguration(next);
-      configuration = next;
-      connectPrinter(next);
-      return sendJson(response, 200, { ok: true, status: publicStatus() }, origin);
-    } catch (error) {
-      if (error instanceof VerificationRequiredError) {
-        return sendJson(response, 428, { error: error.message, verificationRequired: true }, origin);
-      }
-      return sendJson(response, 400, { error: error instanceof Error ? error.message : "保存云端 MQTT 配置失败" }, origin);
-    }
-  }
-  return sendJson(response, 404, { error: "接口不存在" }, origin);
-});
-
-export async function startAdapterService() {
+export async function startAdapterService({ siteUrl = "" } = {}) {
   await mkdir(dataDirectory, { recursive: true });
   await loadSavedConfiguration();
-  await new Promise((resolveStart, rejectStart) => {
-    const onError = (error) => rejectStart(error);
-    server.once("error", onError);
-    server.listen(controlPort, "127.0.0.1", () => {
-      server.off("error", onError);
-      resolveStart();
-    });
-  });
+  if (configuration && siteUrl) {
+    configuration = validateStoredConfiguration({ ...configuration, siteUrl });
+    await saveConfiguration(configuration);
+  }
   forwardTimer = setInterval(() => void forwardLatest(), 4000);
-  console.log(`[PrintFlow] 云端 MQTT Adapter：http://127.0.0.1:${controlPort}`);
+  console.log("[PrintFlow] 云端 MQTT Adapter 已并入 PrintFlow 服务");
 }
 
 export async function stopAdapterService() {
@@ -346,8 +298,6 @@ export async function stopAdapterService() {
     client = null;
   }
   connected = false;
-  if (!server.listening) return;
-  await new Promise((resolveStop) => server.close(resolveStop));
 }
 
 const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);

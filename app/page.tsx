@@ -31,8 +31,6 @@ type LocalAdapterStatus = {
   printer: { name: string; serial: string; adapter: string; region: CloudRegion; regionLabel: string; broker: string } | null;
 };
 
-const LOCAL_ADAPTER_URL = "http://127.0.0.1:8790";
-
 const emptyDraft: Draft = { name: "", sourceUrl: "", plates: 1, durationMinutes: 60, plateDurations: [], plateNames: [], splitByPlate: false, urgent: false, deadline: null, material: "PLA", color: "自然色" };
 
 function postState(payload: Record<string, unknown>) {
@@ -393,7 +391,7 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
 
   useEffect(() => {
     let active = true;
-    const readLocalAdapter = () => fetch(`${LOCAL_ADAPTER_URL}/status`, { cache: "no-store" })
+    const readLocalAdapter = () => fetch("/api/adapter/status", { cache: "no-store" })
       .then((response) => response.ok ? response.json() : Promise.reject())
       .then((status: LocalAdapterStatus) => { if (active && status.mode === "cloud-mqtt") setLocalAdapter(status); })
       .catch(() => { if (active) setLocalAdapter(null); });
@@ -404,7 +402,7 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
 
   async function savePrinter(event: FormEvent) {
     event.preventDefault();
-    if (!localAdapter) return onToast("本地 Adapter 暂时不可用，请使用 npm run local 启动完整服务");
+    if (!localAdapter) return onToast("MQTT Adapter 暂时不可用，请检查 PrintFlow 一体服务是否正常运行");
     if (!serial.trim()) return onToast("请填写打印机序列号");
     const canReuseToken = localAdapter.configured && localAdapter.printer?.region === region;
     if (!canReuseToken && !accessToken.trim() && !account.trim()) {
@@ -420,7 +418,7 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "保存失败");
-      const localResponse = await fetch(`${LOCAL_ADAPTER_URL}/configure`, {
+      const localResponse = await fetch("/api/adapter/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -432,7 +430,6 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
           verificationCode,
           accessToken,
           reuseToken: canReuseToken && !account && !password && !verificationCode && !accessToken,
-          siteUrl: window.location.origin,
           printerId: data.printer.id,
           bridgeToken: data.bridgeToken,
           adapter: X2D_AMS2_ADAPTER_ID,
@@ -519,7 +516,7 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
 
         <div className={`bridge-download ${localAdapter?.connected ? "ready" : ""} local-adapter-card`}>
           <div><span>云端 MQTT Adapter</span><strong>{localAdapter?.connected ? "MQTT 已连接" : localAdapter?.configured ? "正在连接" : localAdapter ? "等待登录" : "服务不可用"}</strong></div>
-          <p>{localAdapter?.printer ? `${localAdapter.printer.regionLabel} · ${localAdapter.printer.broker}:8883` : "Adapter 在当前设备运行，并把打印机状态同步到 PrintFlow。"}</p>
+          <p>{localAdapter?.printer ? `${localAdapter.printer.regionLabel} · ${localAdapter.printer.broker}:8883` : "Adapter 与 PrintFlow 在同一台服务器运行，无需浏览器连接额外地址。"}</p>
           <div className="local-adapter-meta"><span>状态上报</span><b>{localAdapter?.lastForwardAt ? new Date(localAdapter.lastForwardAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "尚未收到"}</b></div>
           {localAdapter?.tokenExpiresAt && <div className="local-adapter-meta"><span>令牌预计有效至</span><b>{new Date(localAdapter.tokenExpiresAt).toLocaleDateString("zh-CN")}</b></div>}
           {localAdapter?.lastError && <div className="local-adapter-error">{localAdapter.lastError}</div>}
