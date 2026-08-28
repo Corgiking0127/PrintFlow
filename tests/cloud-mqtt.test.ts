@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { buildConfiguration, requestVerificationCode } from "../local/adapter-service.mjs";
+import { buildConfiguration, mergeReportPayload, requestVerificationCode } from "../local/adapter-service.mjs";
 
 const localAdapter = readFileSync(new URL("../local/adapter-service.mjs", import.meta.url), "utf8");
 const localStart = readFileSync(new URL("../local/start.mjs", import.meta.url), "utf8");
@@ -48,6 +48,21 @@ test("standalone adapter also uses cloud credentials", () => {
   assert.match(standaloneAdapter, /BAMBU_ACCESS_TOKEN/);
   assert.doesNotMatch(standaloneAdapter, /PRINTER_ACCESS_CODE/);
   assert.doesNotMatch(standaloneAdapter, /PRINTER_HOST/);
+});
+
+test("cloud adapter combines throttled incremental MQTT reports instead of dropping fields", () => {
+  const merged = mergeReportPayload(
+    { print: { gcode_state: "RUNNING", mc_percent: 10, ams: { tray_now: "3" } } },
+    { print: { layer_num: 56, ams: { ams: [{ id: "0" }] } } },
+  );
+  assert.deepEqual(merged, {
+    print: {
+      gcode_state: "RUNNING",
+      mc_percent: 10,
+      layer_num: 56,
+      ams: { tray_now: "3", ams: [{ id: "0" }] },
+    },
+  });
 });
 
 test("cloud token is resolved to a user id and checked against bound printers", async () => {

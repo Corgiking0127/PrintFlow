@@ -151,6 +151,7 @@ h2 { margin: 0; font-size: 16px; letter-spacing: -.2px; }
 .printer-progress-hero > div:first-child span { color: #919998; font-size: 8px; text-transform: uppercase; letter-spacing: .7px; }
 .printer-progress-hero > div:first-child strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 19px; }
 .printer-progress-hero > div:first-child p { margin: 0; color: #747f7f; font-size: 10px; }
+.telemetry-updated-at { color: #929b99; font-size: 8px; font-weight: 500; }
 .radial-progress { width: 92px; height: 92px; flex: 0 0 92px; border-radius: 50%; display: grid; place-items: center; }
 .radial-progress i { width: 73px; height: 73px; border-radius: 50%; background: white; display: grid; place-content: center; text-align: center; font-style: normal; }
 .radial-progress b { font-size: 18px; }.radial-progress span { margin-top: 2px; color: #7d8786; font-size: 8px; }

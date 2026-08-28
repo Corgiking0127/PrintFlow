@@ -48,13 +48,32 @@ export interface PrinterTelemetry {
   activeTrayId: string;
   amsUnits: AmsUnitTelemetry[];
   errors: string[];
+  stateUpdatedAt?: string;
   receivedAt: string;
+}
+
+export function isUnconfirmedPlaceholderTelemetry(telemetry: PrinterTelemetry | null | undefined): boolean {
+  return Boolean(
+    telemetry
+    && !telemetry.stateUpdatedAt
+    && telemetry.state === "idle"
+    && telemetry.progress === 0
+    && telemetry.remainingMinutes === null
+    && telemetry.taskName === "等待队列"
+    && !telemetry.gcodeFile
+    && telemetry.totalLayers === null
+    && telemetry.bedCurrentC === null
+    && telemetry.bedTargetC === null
+    && !telemetry.wifiSignal
+    && telemetry.amsUnits.length === 0
+    && telemetry.nozzles.every((nozzle) => nozzle.currentC === null && nozzle.targetC === null),
+  );
 }
 
 export interface PrinterAdapter {
   id: string;
   model: string;
-  normalize(payload: unknown): PrinterTelemetry;
+  normalize(payload: unknown, previous?: PrinterTelemetry | null): PrinterTelemetry | null;
 }
 
 export interface SavedPrinter {
@@ -65,6 +84,7 @@ export interface SavedPrinter {
   serial: string;
   localIp: string;
   telemetry: PrinterTelemetry | null;
+  dataUpdatedAt: string | null;
   lastSeen: string | null;
   createdAt: string;
   updatedAt: string;

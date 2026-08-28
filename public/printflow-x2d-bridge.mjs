@@ -28,6 +28,23 @@ let latestPayload = null;
 let sending = false;
 let lastSentAt = 0;
 
+function isMergeableObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function mergeReportPayload(previous, incoming) {
+  if (!isMergeableObject(previous)) return incoming;
+  if (!isMergeableObject(incoming)) return incoming ?? previous;
+  const merged = { ...previous };
+  for (const [key, value] of Object.entries(incoming)) {
+    if (["__proto__", "constructor", "prototype"].includes(key)) continue;
+    merged[key] = isMergeableObject(value) && isMergeableObject(previous[key])
+      ? mergeReportPayload(previous[key], value)
+      : value;
+  }
+  return merged;
+}
+
 async function forwardLatest() {
   if (!latestPayload || sending || Date.now() - lastSentAt < 4000) return;
   sending = true;
@@ -49,7 +66,7 @@ async function forwardLatest() {
     lastSentAt = Date.now();
     console.log(`${new Date().toLocaleTimeString()} 状态已同步到 PrintFlow`);
   } catch (error) {
-    latestPayload = payload;
+    latestPayload = mergeReportPayload(payload, latestPayload);
     console.error(`${new Date().toLocaleTimeString()} 同步失败：${error.message}`);
   } finally {
     sending = false;
@@ -78,7 +95,7 @@ client.on("connect", () => {
 
 client.on("message", (_topic, message) => {
   try {
-    latestPayload = JSON.parse(message.toString("utf8"));
+    latestPayload = mergeReportPayload(latestPayload, JSON.parse(message.toString("utf8")));
     void forwardLatest();
   } catch (error) {
     console.error(`忽略无法解析的 MQTT 数据：${error.message}`);

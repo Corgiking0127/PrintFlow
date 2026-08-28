@@ -51,6 +51,17 @@ function temperatureLabel(current: number | null | undefined, target?: number | 
   return target !== null && target !== undefined ? `${Math.round(current)}° / ${Math.round(target)}°` : `${Math.round(current)}°C`;
 }
 
+function dataTimeLabel(value: string) {
+  return new Date(value).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
 export default function Home() {
   const [view, setView] = useState<View>("schedule");
   const [projects, setProjects] = useState<Project[]>([]);
@@ -488,6 +499,8 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
 
   const nozzleSummary = telemetry?.nozzles || [];
   const amsUnits = telemetry?.amsUnits || [];
+  const dataUpdatedAt = printer?.dataUpdatedAt || telemetry?.receivedAt;
+  const stateUpdatedAt = telemetry?.stateUpdatedAt;
 
   return <>
     <section className={`notice-card printer-connection-notice ${online ? "online" : "neutral"}`}>
@@ -502,7 +515,7 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
 
         {telemetry ? <>
           <div className="printer-progress-hero">
-            <div><span>当前任务</span><strong>{telemetry.taskName}</strong><p>{remainingLabel(telemetry.remainingMinutes)}{telemetry.currentLayer !== null ? ` · 层 ${telemetry.currentLayer}/${telemetry.totalLayers || "—"}` : ""}</p></div>
+            <div><span>当前任务</span><strong>{telemetry.taskName}</strong><p>{remainingLabel(telemetry.remainingMinutes)}{telemetry.currentLayer !== null ? ` · 层 ${telemetry.currentLayer}/${telemetry.totalLayers || "—"}` : ""}</p>{dataUpdatedAt && <small className="telemetry-updated-at">{online ? "数据更新于" : "当前显示上次真实数据 · 更新于"} {dataTimeLabel(dataUpdatedAt)}{stateUpdatedAt && stateUpdatedAt !== dataUpdatedAt ? ` · 状态确认于 ${dataTimeLabel(stateUpdatedAt)}` : ""}</small>}</div>
             <div className="radial-progress" style={{ background: `conic-gradient(#6f7eff ${telemetry.progress}%, #eceee9 0)` }}><i><b>{telemetry.progress}%</b><span>{telemetry.stateLabel}</span></i></div>
           </div>
 

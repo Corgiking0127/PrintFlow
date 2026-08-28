@@ -32,6 +32,23 @@ let lastForwardAt = null;
 let lastError = "";
 let forwardTimer = null;
 
+function isMergeableObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+export function mergeReportPayload(previous, incoming) {
+  if (!isMergeableObject(previous)) return incoming;
+  if (!isMergeableObject(incoming)) return incoming ?? previous;
+  const merged = { ...previous };
+  for (const [key, value] of Object.entries(incoming)) {
+    if (["__proto__", "constructor", "prototype"].includes(key)) continue;
+    merged[key] = isMergeableObject(value) && isMergeableObject(previous[key])
+      ? mergeReportPayload(previous[key], value)
+      : value;
+  }
+  return merged;
+}
+
 export class VerificationRequiredError extends Error {
   constructor(message = "拓竹账号要求验证码，请查收短信或邮件后填写验证码") {
     super(message);
@@ -233,7 +250,7 @@ async function forwardLatest() {
     lastForwardAt = new Date().toISOString();
     lastError = "";
   } catch (error) {
-    latestPayload = payload;
+    latestPayload = mergeReportPayload(payload, latestPayload);
     lastError = error instanceof Error ? error.message : "状态同步失败";
   } finally {
     sending = false;
@@ -265,7 +282,7 @@ function connectPrinter(next) {
   });
   client.on("message", (_topic, message) => {
     try {
-      latestPayload = JSON.parse(message.toString("utf8"));
+      latestPayload = mergeReportPayload(latestPayload, JSON.parse(message.toString("utf8")));
       lastMessageAt = new Date().toISOString();
       void forwardLatest();
     } catch (error) {

@@ -2,12 +2,13 @@ import { desc, eq } from "drizzle-orm";
 import { getDb } from "../../../db";
 import { printers } from "../../../db/schema";
 import { createBridgeToken, ensurePrinterSchema, safePrinterId, sha256 } from "../../../lib/printers/store";
-import { X2D_AMS2_ADAPTER_ID } from "../../../lib/printers/types";
+import { isUnconfirmedPlaceholderTelemetry, X2D_AMS2_ADAPTER_ID } from "../../../lib/printers/types";
 
 function publicPrinter(row: typeof printers.$inferSelect) {
   const { bridgeTokenHash: _secret, ...printer } = row;
   void _secret;
-  return printer;
+  const telemetry = isUnconfirmedPlaceholderTelemetry(printer.telemetry) ? null : printer.telemetry;
+  return { ...printer, telemetry, dataUpdatedAt: telemetry?.receivedAt ?? null };
 }
 
 export async function GET() {

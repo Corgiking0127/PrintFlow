@@ -20,6 +20,14 @@ function list(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+function has(source: JsonObject, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(source, key);
+}
+
+function hasAny(source: JsonObject, keys: string[]): boolean {
+  return keys.some((key) => has(source, key));
+}
+
 function firstNumber(source: JsonObject, keys: string[]): number | null {
   for (const key of keys) {
     const value = number(source[key]);
@@ -35,7 +43,7 @@ function normalizeState(rawState: string): { state: PrinterState; label: string 
   if (["FINISH", "FINISHED", "COMPLETE"].includes(normalized)) return { state: "complete", label: "已完成" };
   if (["FAILED", "FAIL", "ERROR"].includes(normalized)) return { state: "failed", label: "异常" };
   if (["PREPARE", "PREPARING", "SLICING"].includes(normalized)) return { state: "preparing", label: "准备中" };
-  if (["IDLE", "READY", ""].includes(normalized)) return { state: "idle", label: "待机" };
+  if (["IDLE", "READY"].includes(normalized)) return { state: "idle", label: "待机" };
   return { state: "unknown", label: rawState || "未知" };
 }
 
@@ -100,7 +108,7 @@ function buildErrors(print: JsonObject): string[] {
   return errors.slice(0, 8);
 }
 
-function normalizeX2dAms2Pro(payload: unknown): PrinterTelemetry {
+function buildTelemetry(payload: unknown): PrinterTelemetry {
   const root = object(payload);
   const print = object(root.print || root);
   const ams = object(print.ams);
@@ -126,6 +134,7 @@ function normalizeX2dAms2Pro(payload: unknown): PrinterTelemetry {
     };
   });
 
+  const receivedAt = new Date().toISOString();
   return {
     state: mappedState.state,
     stateLabel: mappedState.label,
@@ -144,8 +153,146 @@ function normalizeX2dAms2Pro(payload: unknown): PrinterTelemetry {
     activeTrayId,
     amsUnits,
     errors: buildErrors(print),
-    receivedAt: new Date().toISOString(),
+    stateUpdatedAt: receivedAt,
+    receivedAt,
   };
+}
+
+const nozzleKeys = [
+  "nozzle_temper",
+  "nozzle_target_temper",
+  "nozzle_1_temper",
+  "left_nozzle_temper",
+  "nozzle_temper_left",
+  "nozzle_2_temper",
+  "right_nozzle_temper",
+  "nozzle_temper_right",
+  "nozzle_1_target_temper",
+  "left_nozzle_target_temper",
+  "nozzle_target_temper_left",
+  "nozzle_2_target_temper",
+  "right_nozzle_target_temper",
+  "nozzle_target_temper_right",
+];
+
+function mergeNozzles(print: JsonObject, previous: NozzleTelemetry[]): NozzleTelemetry[] | null {
+  if (!hasAny(print, nozzleKeys)) return null;
+  const incoming = buildNozzles(print);
+  const hasReading = incoming.some((nozzle) => nozzle.currentC !== null || nozzle.targetC !== null);
+  if (!hasReading) return null;
+  return incoming.map((nozzle) => {
+    const cached = previous.find((item) => item.id === nozzle.id);
+    return {
+      ...nozzle,
+      currentC: nozzle.currentC ?? cached?.currentC ?? null,
+      targetC: nozzle.targetC ?? cached?.targetC ?? null,
+    };
+  });
+}
+
+function normalizeX2dAms2Pro(payload: unknown, previous?: PrinterTelemetry | null): PrinterTelemetry | null {
+  const root = object(payload);
+  const print = object(root.print || root);
+  const rawState = string(print.gcode_state).trim();
+
+  // A first incremental report without gcode_state cannot establish whether the
+  // printer is idle or printing. Wait for a real state instead of fabricating idle.
+  if (!previous) return rawState ? buildTelemetry(payload) : null;
+
+  const next: PrinterTelemetry = {
+    ...previous,
+    nozzles: previous.nozzles.map((nozzle) => ({ ...nozzle })),
+    amsUnits: previous.amsUnits.map((unit) => ({
+      ...unit,
+      trays: unit.trays.map((tray) => ({ ...tray })),
+    })),
+    errors: [...previous.errors],
+  };
+  let changed = false;
+
+  if (rawState) {
+    const mappedState = normalizeState(rawState);
+    const stateChanged = mappedState.state !== previous.state;
+    next.state = mappedState.state;
+    next.stateLabel = mappedState.label;
+    changed = true;
+    if (stateChanged && mappedState.state === "idle") {
+      next.progress = 0;
+      next.remainingMinutes = null;
+      next.taskName = "等待队列";
+      next.gcodeFile = "";
+      next.currentLayer = null;
+      next.totalLayers = null;
+    }
+  }
+
+  const updateNumber = (key: string, assign: (value: number) => void) => {
+    if (!has(print, key)) return;
+    const value = number(print[key]);
+    if (value === null) return;
+    assign(value);
+    changed = true;
+  };
+  updateNumber("mc_percent", (value) => { next.progress = Math.max(0, Math.min(100, Math.round(value))); });
+  updateNumber("mc_remaining_time", (value) => { next.remainingMinutes = value; });
+  updateNumber("layer_num", (value) => { next.currentLayer = value; });
+  updateNumber("total_layer_num", (value) => { next.totalLayers = value; });
+  updateNumber("bed_temper", (value) => { next.bedCurrentC = value; });
+  updateNumber("bed_target_temper", (value) => { next.bedTargetC = value; });
+  updateNumber("chamber_temper", (value) => { next.chamberCurrentC = value; });
+  updateNumber("spd_lvl", (value) => { next.speedLevel = value; });
+
+  if (has(print, "subtask_name") && string(print.subtask_name).trim()) {
+    next.taskName = string(print.subtask_name);
+    changed = true;
+  } else if (has(print, "gcode_file") && string(print.gcode_file).trim()) {
+    next.taskName = string(print.gcode_file);
+    changed = true;
+  }
+  if (has(print, "gcode_file") && (typeof print.gcode_file === "string" || typeof print.gcode_file === "number")) {
+    next.gcodeFile = string(print.gcode_file);
+    changed = true;
+  }
+  if (has(print, "wifi_signal") && string(print.wifi_signal).trim()) {
+    next.wifiSignal = string(print.wifi_signal);
+    changed = true;
+  }
+
+  const nozzles = mergeNozzles(print, previous.nozzles);
+  if (nozzles) {
+    next.nozzles = nozzles;
+    changed = true;
+  }
+
+  const ams = object(print.ams);
+  if (has(ams, "tray_now") && string(ams.tray_now).trim()) {
+    const activeRaw = string(ams.tray_now);
+    const activeNumeric = /^\d+$/.test(activeRaw) ? Number(activeRaw) : null;
+    next.activeTrayId = activeRaw.includes("-") ? activeRaw : activeNumeric !== null && activeNumeric >= 0 && activeNumeric < 254
+      ? `${Math.floor(activeNumeric / 4)}-${activeNumeric % 4}`
+      : activeRaw;
+    next.amsUnits = next.amsUnits.map((unit) => ({
+      ...unit,
+      trays: unit.trays.map((tray) => ({ ...tray, active: tray.id === next.activeTrayId })),
+    }));
+    changed = true;
+  }
+  if (has(ams, "ams") && list(ams.ams).length > 0) {
+    const normalized = buildTelemetry(payload);
+    next.amsUnits = normalized.amsUnits;
+    if (!next.activeTrayId && normalized.activeTrayId) next.activeTrayId = normalized.activeTrayId;
+    changed = true;
+  }
+
+  if (has(print, "print_error") || has(print, "hms")) {
+    next.errors = buildErrors(print);
+    changed = true;
+  }
+
+  if (!changed) return previous;
+  next.receivedAt = new Date().toISOString();
+  if (rawState) next.stateUpdatedAt = next.receivedAt;
+  return next;
 }
 
 export const x2dAms2ProAdapter: PrinterAdapter = {

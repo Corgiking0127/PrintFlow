@@ -23,10 +23,18 @@ export async function POST(request: Request) {
 
     const adapter = getPrinterAdapter(adapterId);
     if (!adapter) return Response.json({ error: "不支持的打印机适配器" }, { status: 400 });
-    const telemetry = adapter.normalize(payload.payload);
+    const telemetry = adapter.normalize(payload.payload, printer.telemetry);
     const now = new Date().toISOString();
-    await db.update(printers).set({ telemetry, lastSeen: now, updatedAt: now }).where(eq(printers.id, printer.id));
-    return Response.json({ ok: true, state: telemetry.state, receivedAt: telemetry.receivedAt });
+    const telemetryChanged = Boolean(telemetry && telemetry !== printer.telemetry);
+    await db.update(printers).set(telemetryChanged
+      ? { telemetry, lastSeen: now, updatedAt: telemetry?.receivedAt ?? now }
+      : { lastSeen: now }).where(eq(printers.id, printer.id));
+    return Response.json({
+      ok: true,
+      state: telemetry?.state ?? null,
+      dataUpdated: telemetryChanged,
+      receivedAt: telemetry?.receivedAt ?? null,
+    });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "接收 MQTT 数据失败" }, { status: 500 });
   }
