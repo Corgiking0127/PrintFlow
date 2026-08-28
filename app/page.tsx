@@ -2,6 +2,8 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { buildSchedule, durationLabel, Project, ScheduleSettings, timeLabel } from "../lib/scheduler";
+import type { SavedPrinter } from "../lib/printers/types";
+import { X2D_AMS2_ADAPTER_ID } from "../lib/printers/types";
 
 const seedProjects: Project[] = [
   { id: "demo-helmet", name: "星际骑士头盔", sourceUrl: "https://makerworld.com/", plates: 4, durationMinutes: 1360, plateDurations: [310, 385, 298, 367], plateNames: ["面罩", "头盔主体", "后盖", "连接件"], splitByPlate: true, urgent: false, deadline: null, material: "PLA", color: "银灰", status: "queued" },
@@ -22,12 +24,6 @@ const defaultSettings: ScheduleSettings = {
   barkKey: "",
 };
 
-const machines = [
-  { name: "P1S-01", state: "打印中", task: "星际骑士头盔", progress: 68, eta: "02:18 完成", color: "#6f7eff" },
-  { name: "A1 mini", state: "待机", task: "等待队列", progress: 0, eta: "可立即开始", color: "#3ac28f" },
-  { name: "X1C-01", state: "打印中", task: "桌面收纳盒", progress: 24, eta: "明日 08:35", color: "#f2a65a" },
-];
-
 type View = "schedule" | "projects" | "printers" | "rules" | "notifications";
 type Draft = Omit<Project, "id" | "status">;
 
@@ -37,11 +33,25 @@ function postState(payload: Record<string, unknown>) {
   return fetch("/api/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
 }
 
+function isPrinterOnline(printer?: SavedPrinter | null) {
+  return Boolean(printer?.lastSeen && Date.now() - new Date(printer.lastSeen).getTime() < 90000);
+}
+
+function remainingLabel(minutes: number | null | undefined) {
+  if (minutes === null || minutes === undefined) return "等待实时数据";
+  return minutes < 60 ? `约 ${Math.max(0, Math.round(minutes))} 分钟` : `约 ${Math.floor(minutes / 60)}h ${Math.round(minutes % 60)}m`;
+}
+
+function temperatureLabel(current: number | null | undefined, target?: number | null) {
+  if (current === null || current === undefined) return "—";
+  return target !== null && target !== undefined ? `${Math.round(current)}° / ${Math.round(target)}°` : `${Math.round(current)}°C`;
+}
+
 export default function Home() {
   const [view, setView] = useState<View>("schedule");
   const [projects, setProjects] = useState<Project[]>(seedProjects);
   const [settings, setSettings] = useState<ScheduleSettings>(defaultSettings);
-  const [now, setNow] = useState(new Date(2026, 7, 28, 21, 30));
+  const [now, setNow] = useState(() => new Date());
   const [importOpen, setImportOpen] = useState(false);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [importing, setImporting] = useState(false);
@@ -51,14 +61,25 @@ export default function Home() {
   const [queueMode, setQueueMode] = useState<"timeline" | "list">("timeline");
   const [activeStarted, setActiveStarted] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [printers, setPrinters] = useState<SavedPrinter[]>([]);
   const reminded = useRef(new Set<string>());
 
   useEffect(() => {
-    setNow(new Date());
     fetch("/api/state").then((response) => response.ok ? response.json() : Promise.reject()).then((data) => {
       if (data.projects?.length) setProjects(data.projects);
       if (data.settings) setSettings((current) => ({ ...current, ...data.settings }));
     }).catch(() => undefined).finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const loadPrinters = () => fetch("/api/printers")
+      .then((response) => response.ok ? response.json() : Promise.reject())
+      .then((data) => { if (active) setPrinters(data.printers || []); })
+      .catch(() => undefined);
+    void loadPrinters();
+    const timer = window.setInterval(loadPrinters, 15000);
+    return () => { active = false; window.clearInterval(timer); };
   }, []);
 
   const schedule = useMemo(() => buildSchedule(projects, settings, now), [projects, settings, now]);
@@ -66,6 +87,42 @@ export default function Home() {
   const idleMinutes = schedule.reduce((sum, item) => sum + item.idleMinutes, 0);
   const utilization = Math.max(0, Math.min(99, Math.round(totalMinutes / Math.max(1, totalMinutes + idleMinutes) * 100)));
   const nextTask = schedule[0];
+  const primaryPrinter = printers[0];
+  const printerOnline = isPrinterOnline(primaryPrinter);
+  const telemetry = primaryPrinter?.telemetry;
+  const primaryAms = telemetry?.amsUnits?.[0];
+  const deviceCards = [
+    {
+      name: primaryPrinter?.name || "X2D 工作站",
+      state: primaryPrinter ? (printerOnline ? telemetry?.stateLabel || "已连接" : "桥接离线") : "待配置",
+      task: telemetry?.taskName || (primaryPrinter ? "等待 MQTT 数据" : "前往打印机设置完成接入"),
+      progress: telemetry?.progress || 0,
+      eta: remainingLabel(telemetry?.remainingMinutes),
+      meta: telemetry?.currentLayer !== null && telemetry?.currentLayer !== undefined ? `层 ${telemetry.currentLayer} / ${telemetry.totalLayers || "—"}` : "X2D · 双喷嘴",
+      color: "#6f7eff",
+      idle: telemetry?.state === "idle" || !printerOnline,
+    },
+    {
+      name: "AMS 2 Pro",
+      state: printerOnline ? (primaryAms?.drying ? "干燥中" : "已连接") : "等待桥接",
+      task: primaryAms ? `${primaryAms.trays.length} 个槽位 · 湿度等级 ${primaryAms.humidityLevel ?? "—"}` : "耗材、湿度与干燥状态",
+      progress: primaryAms?.trays.length ? Math.round(primaryAms.trays.reduce((sum, tray) => sum + (tray.remainingPercent || 0), 0) / primaryAms.trays.length) : 0,
+      eta: primaryAms ? `舱温 ${temperatureLabel(primaryAms.temperatureC)}` : "连接后自动读取",
+      meta: primaryAms?.humidityPercent !== null && primaryAms?.humidityPercent !== undefined ? `湿度 ${primaryAms.humidityPercent}%` : "AMS 2 Pro 适配器",
+      color: "#35bd87",
+      idle: !printerOnline,
+    },
+    {
+      name: "MQTT 局域网桥接",
+      state: printerOnline ? "同步中" : primaryPrinter ? "未收到数据" : "未配置",
+      task: primaryPrinter ? `${primaryPrinter.localIp}:8883 · ${primaryPrinter.serial}` : "本地读取，安全转发",
+      progress: printerOnline ? 100 : 0,
+      eta: primaryPrinter?.lastSeen ? `最后同步 ${new Date(primaryPrinter.lastSeen).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}` : "等待首次同步",
+      meta: "只读 MQTT",
+      color: "#f2a65a",
+      idle: !printerOnline,
+    },
+  ];
 
   useEffect(() => {
     if (!settings.barkKey || !nextTask || reminded.current.has(nextTask.id)) return;
@@ -202,7 +259,7 @@ export default function Home() {
         <nav aria-label="主导航">
           {nav.map((item) => <button key={item.id} className={`nav-item ${view === item.id ? "active" : ""}`} onClick={() => setView(item.id)}><span>{item.icon}</span>{item.label}{item.count !== undefined && <b>{item.count}</b>}</button>)}
         </nav>
-        <div className="side-footer"><div className="avatar">YF</div><div><strong>我的工作室</strong><span>3 台设备在线</span></div><button aria-label="打开设置">···</button></div>
+        <div className="side-footer"><div className="avatar">YF</div><div><strong>我的工作室</strong><span>{printerOnline ? "X2D 实时在线" : printers.length ? "X2D 等待桥接" : "打印机待配置"}</span></div><button aria-label="打开打印机设置" onClick={() => setView("printers")}>···</button></div>
       </aside>
 
       <section className="workspace">
@@ -220,10 +277,10 @@ export default function Home() {
 
           <div className="section-heading"><div><h2>设备状态</h2><p>实时掌握工作室产能</p></div><button className="text-button" onClick={() => setView("printers")}>管理设备</button></div>
           <section className="machine-grid">
-            {machines.map((machine) => <article className="machine-card" key={machine.name}>
-              <div className="machine-head"><span className="printer-glyph">▱</span><div><strong>{machine.name}</strong><span><i className={machine.state === "待机" ? "idle" : ""} />{machine.state}</span></div><button aria-label={`${machine.name}菜单`}>•••</button></div>
+            {deviceCards.map((machine) => <article className="machine-card" key={machine.name}>
+              <div className="machine-head"><span className="printer-glyph">▱</span><div><strong>{machine.name}</strong><span><i className={machine.idle ? "idle" : ""} />{machine.state}</span></div><button aria-label={`${machine.name}设置`} onClick={() => setView("printers")}>•••</button></div>
               <div className="machine-task"><span>{machine.task}</span><b>{machine.progress}%</b></div><div className="progress"><i style={{ width: `${machine.progress || 3}%`, background: machine.color }} /></div>
-              <div className="machine-meta"><span>{machine.eta}</span><span>{machine.state === "待机" ? `队列 ${projects.length} 项` : "PLA · 0.20mm"}</span></div>
+              <div className="machine-meta"><span>{machine.eta}</span><span>{machine.meta}</span></div>
             </article>)}
           </section>
 
@@ -252,7 +309,7 @@ export default function Home() {
         </>}
 
         {view === "projects" && <ProjectsView projects={projects} onUpdate={updateProject} onDelete={deleteProject} onImport={() => setImportOpen(true)} />}
-        {view === "printers" && <PrintersView />}
+        {view === "printers" && <PrintersView printers={printers} onRefresh={(next) => setPrinters(next)} onToast={flash} />}
         {view === "rules" && <RulesView settings={settings} onChange={setSettings} onSave={saveRules} scheduleCount={schedule.length} idleMinutes={idleMinutes} />}
         {view === "notifications" && <NotificationsView settings={settings} onChange={setSettings} onSave={saveRules} onTest={testBark} />}
       </section>
@@ -261,7 +318,7 @@ export default function Home() {
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="import-title">
           <div className="modal-head"><div><span>MAKERWORLD IMPORT</span><h2 id="import-title">导入打印项目</h2></div><button onClick={() => setImportOpen(false)} aria-label="关闭">×</button></div>
           {!imported ? <form onSubmit={fetchMakerWorld} className="import-step">
-            <label>MakerWorld 网页链接<input type="url" placeholder="https://makerworld.com/zh/models/...#profileId-..." value={draft.sourceUrl} onChange={(event) => setDraft({ ...draft, sourceUrl: event.target.value })} autoFocus /></label>
+            <label>MakerWorld 网页链接<input type="url" placeholder="https://makerworld.com/zh/models/...#profileId-..." value={draft.sourceUrl} onChange={(event) => setDraft({ ...draft, sourceUrl: event.target.value })} /></label>
             <div className="import-hint"><b>系统将自动获取</b><div><span>✓ 项目名称</span><span>✓ 打印盘数</span><span>✓ 每盘打印时间</span><span>✓ 对应打印 Profile</span></div><p>带 #profileId 的链接会读取对应设备配置，排产时间更准确。</p></div>
             <button className="modal-primary" disabled={importing}>{importing ? "正在读取每盘数据…" : "读取网页并继续 →"}</button>
             <button type="button" className="modal-secondary" onClick={() => { setImportProfile(null); setImported(true); }}>暂时手动录入</button>
@@ -276,7 +333,7 @@ export default function Home() {
             <label>材料<select value={draft.material} onChange={(event) => setDraft({ ...draft, material: event.target.value })}><option>PLA</option><option>PETG</option><option>ABS</option><option>ASA</option><option>TPU</option></select></label>
             <label>颜色<input value={draft.color} onChange={(event) => setDraft({ ...draft, color: event.target.value })} /></label>
             <label className="wide">交付时间（可选）<input type="datetime-local" value={draft.deadline || ""} onChange={(event) => setDraft({ ...draft, deadline: event.target.value || null })} /></label>
-            <label className="check-row wide"><input type="checkbox" checked={draft.urgent} onChange={(event) => setDraft({ ...draft, urgent: event.target.checked })} /><span><b>设为加急</b><small>加急项目会抢占普通队列，但仍尽量避免无人换盘时段。</small></span></label>
+            <div className="check-row wide"><input id="urgent-project" aria-label="设为加急" type="checkbox" checked={draft.urgent} onChange={(event) => setDraft({ ...draft, urgent: event.target.checked })} /><span><b>设为加急</b><small>加急项目会抢占普通队列，但仍尽量避免无人换盘时段。</small></span></div>
             <div className={`verification wide ${draft.plateDurations?.length === draft.plates ? "verified" : ""}`}>{draft.splitByPlate ? `已启用逐盘规划：队列会生成 ${draft.plates} 个独立任务，并使用每盘实际时长。` : `当前按整项目规划：${draft.plates} 个盘合并为一个 ${durationLabel(draft.durationMinutes)} 的连续任务。`}</div>
             <button className="modal-primary wide">加入队列并自动排产</button>
           </form>}
@@ -301,13 +358,147 @@ function ProjectsView({ projects, onUpdate, onDelete, onImport }: { projects: Pr
   </section>;
 }
 
-function PrintersView() {
-  return <><section className="notice-card neutral"><div className="notice-icon">▣</div><div><strong>可接入 Bambu Lab 设备状态</strong><p>当前版本先按设备可用时间排产；接入 MQTT 或局域网接口后，可自动同步完成、暂停、失败和耗材状态。</p></div><button>查看接入说明 →</button></section><section className="printer-manage-grid">{machines.map((machine, index) => <article className="printer-manage-card" key={machine.name}><div className="printer-visual"><span>▱</span><i className={machine.state === "待机" ? "idle" : ""} /></div><h2>{machine.name}</h2><p>{index === 0 ? "Bambu Lab P1S · 0.4mm 喷嘴" : index === 1 ? "Bambu Lab A1 mini · 0.4mm 喷嘴" : "Bambu Lab X1 Carbon · 0.4mm 喷嘴"}</p><div><span>状态</span><strong>{machine.state}</strong></div><div><span>维护提醒</span><strong>{index === 1 ? "喷嘴清洁" : "状态良好"}</strong></div><button>编辑设备</button></article>)}</section></>;
+function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter[]; onRefresh: (printers: SavedPrinter[]) => void; onToast: (message: string) => void }) {
+  const printer = printers[0];
+  const telemetry = printer?.telemetry;
+  const online = isPrinterOnline(printer);
+  const loadedId = useRef("");
+  const [name, setName] = useState("X2D 工作站");
+  const [serial, setSerial] = useState("");
+  const [localIp, setLocalIp] = useState("");
+  const [accessCode, setAccessCode] = useState("");
+  const [bridgeToken, setBridgeToken] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!printer || printer.id === loadedId.current) return;
+    const timer = window.setTimeout(() => {
+      loadedId.current = printer.id;
+      setName(printer.name);
+      setSerial(printer.serial);
+      setLocalIp(printer.localIp);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [printer]);
+
+  async function savePrinter(event: FormEvent) {
+    event.preventDefault();
+    if (!serial.trim() || !localIp.trim()) return onToast("请填写序列号和局域网地址");
+    if (!accessCode.trim()) return onToast("请输入打印机 LAN Access Code；它只在本浏览器中使用");
+    setSaving(true);
+    try {
+      const response = await fetch("/api/printers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "save", id: printer?.id, name, serial, localIp, adapter: X2D_AMS2_ADAPTER_ID, rotateToken: true }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "保存失败");
+      setBridgeToken(data.bridgeToken || "");
+      loadedId.current = data.printer.id;
+      onRefresh([data.printer, ...printers.filter((item) => item.id !== data.printer.id)]);
+      onToast("打印机已保存，桥接配置已生成");
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : "保存失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function downloadBridgeConfig() {
+    if (!bridgeToken || !accessCode.trim()) return onToast("请先保存打印机并生成一次性桥接凭证");
+    const clean = (value: string) => value.replace(/[\r\n"]/g, "");
+    const contents = [
+      `PRINTER_NAME="${clean(name)}"`,
+      `PRINTER_MODEL="Bambu Lab X2D + AMS 2 Pro"`,
+      `PRINTER_HOST="${clean(localIp)}"`,
+      `PRINTER_MQTT_PORT="8883"`,
+      `PRINTER_SERIAL="${clean(serial.toUpperCase())}"`,
+      `PRINTER_ACCESS_CODE="${clean(accessCode)}"`,
+      `PRINTER_ADAPTER="${X2D_AMS2_ADAPTER_ID}"`,
+      `PRINTFLOW_SITE_URL="${window.location.origin}"`,
+      `PRINTFLOW_PRINTER_ID="${printer?.id || loadedId.current}"`,
+      `PRINTFLOW_BRIDGE_TOKEN="${bridgeToken}"`,
+      "",
+    ].join("\n");
+    const url = URL.createObjectURL(new Blob([contents], { type: "text/plain;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "printflow-x2d.env";
+    link.click();
+    URL.revokeObjectURL(url);
+    onToast("桥接配置已下载，请妥善保存");
+  }
+
+  const nozzleSummary = telemetry?.nozzles || [];
+  const amsUnits = telemetry?.amsUnits || [];
+
+  return <>
+    <section className={`notice-card printer-connection-notice ${online ? "online" : "neutral"}`}>
+      <div className="notice-icon">{online ? "↯" : "▣"}</div>
+      <div><strong>{online ? "X2D MQTT 状态正在实时同步" : printer ? "设备已配置，等待局域网桥接器上线" : "配置 X2D + AMS 2 Pro 的 MQTT 读取"}</strong><p>云端页面不直接访问家庭局域网；本地桥接器只读订阅打印机状态，再通过加密连接同步到 PrintFlow。</p></div>
+      <span className={`live-badge ${online ? "connected" : ""}`}>{online ? "实时在线" : "离线"}</span>
+    </section>
+
+    <div className="printer-settings-layout">
+      <section className="content-card printer-live-panel">
+        <div className="content-head"><div><h2>{printer?.name || "X2D 实时状态"}</h2><p>{printer ? `${printer.model} · ${printer.serial}` : "完成右侧设置后，这里会显示打印机和 AMS 状态。"}</p></div><span className={`connection ${online ? "connected" : ""}`}>{online ? telemetry?.stateLabel || "已连接" : "未连接"}</span></div>
+
+        {telemetry ? <>
+          <div className="printer-progress-hero">
+            <div><span>当前任务</span><strong>{telemetry.taskName}</strong><p>{remainingLabel(telemetry.remainingMinutes)}{telemetry.currentLayer !== null ? ` · 层 ${telemetry.currentLayer}/${telemetry.totalLayers || "—"}` : ""}</p></div>
+            <div className="radial-progress" style={{ background: `conic-gradient(#6f7eff ${telemetry.progress}%, #eceee9 0)` }}><i><b>{telemetry.progress}%</b><span>{telemetry.stateLabel}</span></i></div>
+          </div>
+
+          <div className="telemetry-grid">
+            {nozzleSummary.map((nozzle) => <div key={nozzle.id}><span>{nozzle.label}</span><strong>{temperatureLabel(nozzle.currentC, nozzle.targetC)}</strong><small>当前 / 目标</small></div>)}
+            <div><span>热床</span><strong>{temperatureLabel(telemetry.bedCurrentC, telemetry.bedTargetC)}</strong><small>当前 / 目标</small></div>
+            <div><span>腔温</span><strong>{temperatureLabel(telemetry.chamberCurrentC)}</strong><small>实时温度</small></div>
+            <div><span>Wi-Fi</span><strong>{telemetry.wifiSignal || "—"}</strong><small>打印机信号</small></div>
+          </div>
+
+          <div className="ams-section-head"><div><h3>AMS 2 Pro</h3><p>温湿度、干燥状态与槽位余量</p></div><span>{amsUnits.length ? `${amsUnits.length} 台已识别` : "等待数据"}</span></div>
+          <div className="ams-units">{amsUnits.map((unit) => <article className="ams-unit" key={unit.id}>
+            <div className="ams-unit-head"><div><strong>{unit.label}</strong><span>{unit.drying ? "◌ 干燥中" : "密封存储"}</span></div><div><b>{temperatureLabel(unit.temperatureC)}</b><small>{unit.humidityPercent !== null ? `湿度 ${unit.humidityPercent}%` : `湿度等级 ${unit.humidityLevel ?? "—"}`}</small></div></div>
+            <div className="tray-grid">{unit.trays.map((tray) => <div className={`tray-card ${tray.active ? "active" : ""}`} key={tray.id}><i style={{ background: tray.color }} /><span>{tray.name}</span><strong>{tray.material}</strong><small>{tray.remainingPercent === null ? "余量未知" : `剩余 ${tray.remainingPercent}%`}</small>{tray.active && <b>正在使用</b>}</div>)}</div>
+          </article>)}</div>
+          {telemetry.errors.length > 0 && <div className="printer-errors"><strong>设备告警</strong>{telemetry.errors.map((error) => <span key={error}>{error}</span>)}</div>}
+        </> : <div className="printer-empty"><span>↯</span><strong>等待第一条 MQTT 状态</strong><p>保存设置并运行本地桥接器后，打印进度、双喷嘴温度和 AMS 2 Pro 数据会自动出现。</p></div>}
+      </section>
+
+      <aside className="content-card printer-config-card">
+        <div className="content-head"><div><h2>打印机设置</h2><p>当前仅开放一个适配器，后续型号可独立扩展。</p></div><span className="adapter-version">ADAPTER V1</span></div>
+        <form onSubmit={savePrinter} className="printer-form">
+          <label><span>设备名称</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：X2D 工作站" /></label>
+          <label><span>打印机型号</span><input value="Bambu Lab X2D + AMS 2 Pro" readOnly /></label>
+          <label><span>设备序列号</span><input value={serial} onChange={(event) => setSerial(event.target.value.toUpperCase())} placeholder="打印机设置页中的序列号" autoCapitalize="characters" /></label>
+          <label><span>局域网地址</span><input value={localIp} onChange={(event) => setLocalIp(event.target.value)} placeholder="例如：192.168.1.86" inputMode="decimal" /></label>
+          <label><span>LAN Access Code</span><input type="password" value={accessCode} onChange={(event) => setAccessCode(event.target.value)} placeholder="仅用于生成本地配置" autoComplete="off" /><small>不会发送到云端，也不会写入 PrintFlow 数据库。</small></label>
+          <label><span>数据适配器</span><select value={X2D_AMS2_ADAPTER_ID} disabled><option value={X2D_AMS2_ADAPTER_ID}>X2D + AMS 2 Pro · MQTT</option></select></label>
+          <button className="primary-button config-save" disabled={saving}>{saving ? "正在生成安全凭证…" : printer ? "保存并更新桥接凭证" : "保存并生成桥接配置"}</button>
+        </form>
+
+        <div className={`bridge-download ${bridgeToken ? "ready" : ""}`}>
+          <div><span>局域网桥接器</span><strong>{bridgeToken ? "配置已就绪" : "保存后可下载"}</strong></div>
+          <p>凭证只显示这一次。若遗失，可重新保存并生成新凭证。</p>
+          <div className="download-actions"><button onClick={downloadBridgeConfig} disabled={!bridgeToken}>下载 .env 配置</button><a href="/printflow-x2d-bridge.mjs" download>下载桥接器</a></div>
+        </div>
+
+        <ol className="bridge-steps">
+          <li><b>1</b><span><strong>下载两个文件</strong><small>将 .env 与桥接器放在同一文件夹。</small></span></li>
+          <li><b>2</b><span><strong>安装 MQTT 组件</strong><small>在该文件夹运行 npm install mqtt。</small></span></li>
+          <li><b>3</b><span><strong>保持本地运行</strong><small>运行 node --env-file=printflow-x2d.env printflow-x2d-bridge.mjs。</small></span></li>
+        </ol>
+      </aside>
+    </div>
+
+    <section className="adapter-note"><div><span>适配器架构</span><strong>MQTT 原始数据 → X2D / AMS 2 Pro Adapter → 统一设备状态 → 排产与通知</strong></div><p>新增打印机型号时，只需增加对应适配器，不会改动排产页面和数据结构。</p></section>
+  </>;
 }
 
 function RulesView({ settings, onChange, onSave, scheduleCount, idleMinutes }: { settings: ScheduleSettings; onChange: (value: ScheduleSettings) => void; onSave: () => void; scheduleCount: number; idleMinutes: number }) {
   const field = (key: keyof ScheduleSettings, value: string | number | boolean) => onChange({ ...settings, [key]: value });
-  return <div className="settings-layout"><section className="content-card"><div className="content-head"><div><h2>可换盘时间</h2><p>系统会选择让打印恰好在这些时间附近结束的任务。</p></div></div><div className="rules-grid"><label><span>工作日 · 早晨</span><input value={settings.weekdayMorning} onChange={(event) => field("weekdayMorning", event.target.value)} /><small>默认上班前可换一次</small></label><label><span>工作日 · 中午</span><input value={settings.weekdayNoon} onChange={(event) => field("weekdayNoon", event.target.value)} /><small>默认午休可换一次</small></label><label><span>工作日 · 晚间</span><input value={settings.weekdayEvening} onChange={(event) => field("weekdayEvening", event.target.value)} /><small>长任务会优先占用夜间</small></label><label><span>休息日</span><input value={settings.weekend} onChange={(event) => field("weekend", event.target.value)} /><small>默认白天随时可换盘</small></label></div><div className="rule-divider" /><div className="slider-row"><div><strong>失败与准备缓冲</strong><p>在 DDL 前预留切片、冷却、失败重打时间。</p></div><input type="range" min="0" max="30" value={settings.failureBuffer} onChange={(event) => field("failureBuffer", Number(event.target.value))} /><b>{settings.failureBuffer}%</b></div><label className="switch-row"><span><strong>未按时开始时自动重排</strong><small>超过阈值后，优先安排最能利用当前空档的项目。</small></span><input type="checkbox" checked={settings.autoReschedule} onChange={(event) => field("autoReschedule", event.target.checked)} /></label><button className="primary-button save-rules" onClick={onSave}>保存并重新计算队列</button></section><aside className="rule-preview"><span>规则影响预览</span><strong>{scheduleCount}</strong><p>个排产单元已自动编排</p><div><span>预计空闲</span><b>{durationLabel(idleMinutes)}</b></div><div><span>夜间策略</span><b>长任务优先</b></div><div><span>工作日换盘</span><b>3 个窗口</b></div></aside></div>;
+  return <div className="settings-layout"><section className="content-card"><div className="content-head"><div><h2>可换盘时间</h2><p>系统会选择让打印恰好在这些时间附近结束的任务。</p></div></div><div className="rules-grid"><label><span>工作日 · 早晨</span><input value={settings.weekdayMorning} onChange={(event) => field("weekdayMorning", event.target.value)} /><small>默认上班前可换一次</small></label><label><span>工作日 · 中午</span><input value={settings.weekdayNoon} onChange={(event) => field("weekdayNoon", event.target.value)} /><small>默认午休可换一次</small></label><label><span>工作日 · 晚间</span><input value={settings.weekdayEvening} onChange={(event) => field("weekdayEvening", event.target.value)} /><small>长任务会优先占用夜间</small></label><label><span>休息日</span><input value={settings.weekend} onChange={(event) => field("weekend", event.target.value)} /><small>默认白天随时可换盘</small></label></div><div className="rule-divider" /><div className="slider-row"><div><strong>失败与准备缓冲</strong><p>在 DDL 前预留切片、冷却、失败重打时间。</p></div><input type="range" min="0" max="30" value={settings.failureBuffer} onChange={(event) => field("failureBuffer", Number(event.target.value))} /><b>{settings.failureBuffer}%</b></div><div className="switch-row"><span><strong>未按时开始时自动重排</strong><small>超过阈值后，优先安排最能利用当前空档的项目。</small></span><input id="auto-reschedule" aria-label="未按时开始时自动重排" type="checkbox" checked={settings.autoReschedule} onChange={(event) => field("autoReschedule", event.target.checked)} /></div><button className="primary-button save-rules" onClick={onSave}>保存并重新计算队列</button></section><aside className="rule-preview"><span>规则影响预览</span><strong>{scheduleCount}</strong><p>个排产单元已自动编排</p><div><span>预计空闲</span><b>{durationLabel(idleMinutes)}</b></div><div><span>夜间策略</span><b>长任务优先</b></div><div><span>工作日换盘</span><b>3 个窗口</b></div></aside></div>;
 }
 
 function NotificationsView({ settings, onChange, onSave, onTest }: { settings: ScheduleSettings; onChange: (value: ScheduleSettings) => void; onSave: () => void; onTest: () => void }) {

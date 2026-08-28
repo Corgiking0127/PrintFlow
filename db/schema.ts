@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import type { PrinterTelemetry } from "../lib/printers/types";
 
 export const projects = sqliteTable("projects", {
   id: text("id").primaryKey(),
@@ -31,3 +32,17 @@ export const events = sqliteTable("events", {
   detail: text("detail").notNull().default(""),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [index("idx_events_created_at").on(table.createdAt)]);
+
+export const printers = sqliteTable("printers", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  model: text("model").notNull().default("Bambu Lab X2D + AMS 2 Pro"),
+  adapter: text("adapter").notNull().default("bambu-x2d-ams2pro"),
+  serial: text("serial").notNull(),
+  localIp: text("local_ip").notNull(),
+  bridgeTokenHash: text("bridge_token_hash").notNull(),
+  telemetry: text("telemetry", { mode: "json" }).$type<PrinterTelemetry | null>(),
+  lastSeen: text("last_seen"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [uniqueIndex("idx_printers_serial").on(table.serial)]);
