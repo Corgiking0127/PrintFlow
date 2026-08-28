@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MakerWorldDesign, MakerWorldProfileNotFoundError, makerWorldApiHost, parseMakerWorldDesign } from "../lib/makerworld";
+import { MakerWorldDesign, MakerWorldProfileNotFoundError, fetchMakerWorldDesign, makerWorldApiHost, parseMakerWorldDesign, parseMakerWorldProxyDocument } from "../lib/makerworld";
 
 const design: MakerWorldDesign = {
   title: "多盘测试模型",
@@ -47,6 +47,38 @@ test("global and China MakerWorld links use their matching official API", () => 
   assert.equal(makerWorldApiHost(new URL("https://makerworld.com/en/models/123")), "api.bambulab.com");
   assert.equal(makerWorldApiHost(new URL("https://makerworld.com.cn/zh/models/123")), "api.bambulab.cn");
   assert.equal(makerWorldApiHost(new URL("https://example.com/models/123")), null);
+});
+
+test("structured API JSON can be recovered from the read-only proxy document", () => {
+  const proxyDocument = [
+    "Title: ",
+    "",
+    "URL Source: https://api.bambulab.com/v1/design-service/design/123",
+    "",
+    "Markdown Content:",
+    JSON.stringify(design),
+  ].join("\n");
+  assert.deepEqual(parseMakerWorldProxyDocument(proxyDocument), design);
+  assert.equal(parseMakerWorldProxyDocument("Markdown Content:\nnot-json"), null);
+});
+
+test("structured import falls back to the proxy when direct Bambu access is blocked", async () => {
+  const requests: string[] = [];
+  const fetcher = async (input: string | URL | Request) => {
+    const url = String(input);
+    requests.push(url);
+    if (url.startsWith("https://api.bambulab.com/")) return new Response("blocked", { status: 403 });
+    return new Response(`Title: \n\nMarkdown Content:\n${JSON.stringify(design)}`);
+  };
+  const result = await fetchMakerWorldDesign(
+    "https://api.bambulab.com/v1/design-service/design/123",
+    fetcher as typeof fetch,
+  );
+  assert.deepEqual(result, design);
+  assert.deepEqual(requests, [
+    "https://api.bambulab.com/v1/design-service/design/123",
+    "https://r.jina.ai/https://api.bambulab.com/v1/design-service/design/123",
+  ]);
 });
 
 test("shared profileId fragment selects MakerWorld instance.id instead of the first profile", () => {

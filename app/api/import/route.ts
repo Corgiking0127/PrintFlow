@@ -1,4 +1,4 @@
-import { MakerWorldDesign, MakerWorldProfileNotFoundError, makerWorldApiHost, parseMakerWorldDesign, requestedMakerWorldProfileId } from "../../../lib/makerworld";
+import { MakerWorldProfileNotFoundError, fetchMakerWorldDesign, makerWorldApiHost, parseMakerWorldDesign, requestedMakerWorldProfileId } from "../../../lib/makerworld";
 import { requireUser } from "../../../lib/auth";
 
 function cleanText(value: string) {
@@ -18,11 +18,9 @@ async function readStructuredProject(target: URL) {
   const designId = target.pathname.match(/\/models\/(\d+)/)?.[1];
   const apiHost = makerWorldApiHost(target);
   if (!designId || !apiHost) return null;
-  const response = await fetch(`https://${apiHost}/v1/design-service/design/${designId}`, {
-    headers: { Accept: "application/json", "User-Agent": "PrintFlow/1.1" },
-  });
-  if (!response.ok) return null;
-  const design = await response.json() as MakerWorldDesign;
+  const apiUrl = `https://${apiHost}/v1/design-service/design/${designId}`;
+  const design = await fetchMakerWorldDesign(apiUrl);
+  if (!design) return null;
   return parseMakerWorldDesign(design, target);
 }
 

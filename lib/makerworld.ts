@@ -30,6 +30,44 @@ export type MakerWorldDesign = {
   instances?: MakerWorldInstance[];
 };
 
+function isMakerWorldDesign(value: unknown): value is MakerWorldDesign {
+  return Boolean(value && typeof value === "object" && Array.isArray((value as MakerWorldDesign).instances));
+}
+
+export function parseMakerWorldProxyDocument(document: string) {
+  const marker = "Markdown Content:";
+  const markerIndex = document.indexOf(marker);
+  let payload = markerIndex >= 0 ? document.slice(markerIndex + marker.length).trim() : document.trim();
+  if (payload.startsWith("```")) {
+    payload = payload.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
+  }
+  try {
+    const design = JSON.parse(payload) as unknown;
+    return isMakerWorldDesign(design) ? design : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchMakerWorldDesign(apiUrl: string, fetcher: typeof fetch = fetch) {
+  try {
+    const response = await fetcher(apiUrl, { headers: { Accept: "application/json" } });
+    if (response.ok) {
+      const design = await response.json() as unknown;
+      if (isMakerWorldDesign(design)) return design;
+    }
+  } catch {
+    // Continue with the proxy below when the deployment network cannot reach Bambu directly.
+  }
+
+  try {
+    const response = await fetcher(`https://r.jina.ai/${apiUrl}`, { headers: { Accept: "text/plain" } });
+    return response.ok ? parseMakerWorldProxyDocument(await response.text()) : null;
+  } catch {
+    return null;
+  }
+}
+
 type ProfileCandidate = {
   instanceId: number | null;
   profileId: number | null;
