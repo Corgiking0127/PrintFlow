@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { desc, eq } from "drizzle-orm";
 import { getDb } from "../../../db";
 import { events, projects, settings } from "../../../db/schema";
+import { requireUser } from "../../../lib/auth";
 
 const defaultSettings = {
   weekdayMorning: "08:00-08:30",
@@ -60,8 +61,10 @@ async function ensureSchema() {
   if (additions.length) await d1.batch(additions);
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const auth = await requireUser(request);
+    if ("response" in auth) return auth.response;
     await ensureSchema();
     const db = getDb();
     const [projectRows, settingRows, eventRows] = await Promise.all([
@@ -78,6 +81,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireUser(request);
+    if ("response" in auth) return auth.response;
     await ensureSchema();
     const payload = (await request.json()) as Record<string, unknown>;
     const action = String(payload.action || "");

@@ -46,3 +46,26 @@ export const printers = sqliteTable("printers", {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [uniqueIndex("idx_printers_serial").on(table.serial)]);
+
+export const users = sqliteTable("users", {
+  id: text("id").primaryKey(),
+  account: text("account").notNull(),
+  nickname: text("nickname").notNull(),
+  passwordHash: text("password_hash").notNull(),
+  role: text("role", { enum: ["admin", "user"] }).notNull().default("user"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  uniqueIndex("idx_users_account").on(table.account),
+  uniqueIndex("idx_users_single_admin").on(table.role).where(sql`${table.role} = 'admin'`),
+]);
+
+export const sessions = sqliteTable("sessions", {
+  tokenHash: text("token_hash").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  expiresAt: text("expires_at").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  index("idx_sessions_user_id").on(table.userId),
+  index("idx_sessions_expires_at").on(table.expiresAt),
+]);

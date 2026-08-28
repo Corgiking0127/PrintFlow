@@ -1,6 +1,7 @@
 import { desc, eq } from "drizzle-orm";
 import { getDb } from "../../../db";
 import { printers } from "../../../db/schema";
+import { requireUser } from "../../../lib/auth";
 import { createBridgeToken, ensurePrinterSchema, safePrinterId, sha256 } from "../../../lib/printers/store";
 import { isUnconfirmedPlaceholderTelemetry, X2D_AMS2_ADAPTER_ID } from "../../../lib/printers/types";
 
@@ -11,8 +12,10 @@ function publicPrinter(row: typeof printers.$inferSelect) {
   return { ...printer, telemetry, dataUpdatedAt: telemetry?.receivedAt ?? null };
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const auth = await requireUser(request);
+    if ("response" in auth) return auth.response;
     await ensurePrinterSchema();
     const rows = await getDb().select().from(printers).orderBy(desc(printers.updatedAt));
     return Response.json({ printers: rows.map(publicPrinter) });
@@ -23,6 +26,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireUser(request);
+    if ("response" in auth) return auth.response;
     await ensurePrinterSchema();
     const payload = await request.json() as Record<string, unknown>;
     const action = String(payload.action || "save");

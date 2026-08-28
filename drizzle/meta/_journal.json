@@ -29,6 +29,13 @@
       "when": 1787926555217,
       "tag": "0003_perpetual_eddie_brock",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1787941695018,
+      "tag": "0004_orange_phantom_reporter",
+      "breakpoints": true
     }
   ]
 }

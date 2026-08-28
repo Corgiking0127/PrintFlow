@@ -1,6 +1,9 @@
 import { buildBarkPushUrl } from "../../../lib/bark";
+import { requireUser } from "../../../lib/auth";
 
 export async function POST(request: Request) {
+  const auth = await requireUser(request);
+  if ("response" in auth) return auth.response;
   let payload: { endpoint?: string; key?: string; title?: string; body?: string };
   try {
     payload = (await request.json()) as typeof payload;

@@ -61,13 +61,40 @@ function proxyToWeb(request, response) {
   request.pipe(upstream);
 }
 
+function isAuthenticated(request) {
+  return new Promise((resolveAuth) => {
+    const upstream = createProxyRequest({
+      hostname: internalWebIp,
+      port: internalWebPort,
+      path: "/api/auth/status",
+      method: "GET",
+      headers: { cookie: request.headers.cookie || "", accept: "application/json" },
+    }, (upstreamResponse) => {
+      const chunks = [];
+      upstreamResponse.on("data", (chunk) => chunks.push(chunk));
+      upstreamResponse.on("end", () => {
+        try {
+          const status = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          resolveAuth(upstreamResponse.statusCode === 200 && status.authenticated === true);
+        } catch {
+          resolveAuth(false);
+        }
+      });
+    });
+    upstream.on("error", () => resolveAuth(false));
+    upstream.end();
+  });
+}
+
 const gateway = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || `localhost:${webPort}`}`);
   if (url.pathname === "/api/adapter/status") {
+    if (!(await isAuthenticated(request))) return sendJson(response, 401, { error: "请先登录" });
     if (request.method === "GET") return sendJson(response, 200, getAdapterStatus());
     return sendJson(response, 405, { error: "请求方法不支持" });
   }
   if (url.pathname === "/api/adapter/verification-code") {
+    if (!(await isAuthenticated(request))) return sendJson(response, 401, { error: "请先登录" });
     if (request.method !== "POST") return sendJson(response, 405, { error: "请求方法不支持" });
     try {
       const { region, account } = await readJson(request);
@@ -79,6 +106,7 @@ const gateway = createServer(async (request, response) => {
     }
   }
   if (url.pathname === "/api/adapter/configure") {
+    if (!(await isAuthenticated(request))) return sendJson(response, 401, { error: "请先登录" });
     if (request.method !== "POST") return sendJson(response, 405, { error: "请求方法不支持" });
     try {
       const status = await configureAdapter({ ...(await readJson(request)), siteUrl: internalSiteUrl });

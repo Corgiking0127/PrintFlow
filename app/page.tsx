@@ -18,9 +18,11 @@ const defaultSettings: ScheduleSettings = {
   barkKey: "",
 };
 
-type View = "schedule" | "projects" | "printers" | "rules" | "notifications";
+type View = "schedule" | "projects" | "printers" | "rules" | "notifications" | "users";
 type Draft = Omit<Project, "id" | "status">;
 type CloudRegion = "global" | "china";
+type AuthUser = { id: string; account: string; nickname: string; role: "admin" | "user"; createdAt: string };
+type AuthStatus = { setupRequired: boolean; authenticated: boolean; user: AuthUser | null };
 type LocalAdapterStatus = {
   mode: "cloud-mqtt";
   configured: boolean;
@@ -63,7 +65,88 @@ function dataTimeLabel(value: string) {
   });
 }
 
+function userInitials(user: Pick<AuthUser, "nickname" | "account">) {
+  return (user.nickname || user.account).trim().slice(0, 2).toLocaleUpperCase("zh-CN");
+}
+
 export default function Home() {
+  const [auth, setAuth] = useState<AuthStatus | null>(null);
+  const [authError, setAuthError] = useState("");
+
+  useEffect(() => {
+    fetch("/api/auth/status", { cache: "no-store" })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "无法读取登录状态");
+        setAuth(data);
+      })
+      .catch((error) => setAuthError(error instanceof Error ? error.message : "无法读取登录状态"));
+  }, []);
+
+  if (authError) return <AuthUnavailable message={authError} />;
+  if (!auth) return <div className="auth-loading"><span className="brand-mark">P</span><p>正在准备 PrintFlow…</p></div>;
+  if (auth.setupRequired) return <AuthScreen mode="setup" onAuthenticated={(user) => setAuth({ setupRequired: false, authenticated: true, user })} />;
+  if (!auth.user) return <AuthScreen mode="login" onAuthenticated={(user) => setAuth({ setupRequired: false, authenticated: true, user })} />;
+  return <WorkspaceApp initialUser={auth.user} onSignedOut={() => setAuth({ setupRequired: false, authenticated: false, user: null })} />;
+}
+
+function AuthUnavailable({ message }: { message: string }) {
+  return <main className="auth-shell"><section className="auth-card auth-error-card"><span className="auth-logo">P</span><h1>暂时无法打开 PrintFlow</h1><p>{message}</p><button className="auth-submit" onClick={() => window.location.reload()}>重新加载</button></section></main>;
+}
+
+function AuthScreen({ mode, onAuthenticated }: { mode: "setup" | "login"; onAuthenticated: (user: AuthUser) => void }) {
+  const setup = mode === "setup";
+  const [account, setAccount] = useState("");
+  const [nickname, setNickname] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setError("");
+    if (setup && password !== confirmPassword) return setError("两次输入的密码不一致");
+    setBusy(true);
+    try {
+      const response = await fetch(setup ? "/api/auth/setup" : "/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ account, nickname, password }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || (setup ? "创建失败" : "登录失败"));
+      onAuthenticated(data.user);
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "操作失败，请稍后重试");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <main className="auth-shell">
+    <section className="auth-intro">
+      <div className="auth-brand"><span className="brand-mark">P</span><strong>PrintFlow</strong></div>
+      <div><span className="auth-kicker">SECURE WORKSPACE</span><h1>{setup ? "先创建你的管理员账号" : "欢迎回到打印工作室"}</h1><p>{setup ? "这是全新安装的首次设置。管理员可进入控制台创建团队用户，所有资料都会保存在当前 PrintFlow 数据库中。" : "登录后继续管理打印队列、设备状态与换盘提醒。"}</p></div>
+      <ul><li><b>01</b><span><strong>独立账号</strong><small>每位成员使用自己的账号进入</small></span></li><li><b>02</b><span><strong>安全会话</strong><small>密码不会以明文保存</small></span></li><li><b>03</b><span><strong>集中管理</strong><small>管理员在控制台创建用户</small></span></li></ul>
+    </section>
+    <section className="auth-card">
+      <div className="auth-card-head"><span>{setup ? "首次设置" : "账号登录"}</span><h2>{setup ? "创建管理员" : "登录 PrintFlow"}</h2><p>{setup ? "完成后将直接进入工作台。" : "请输入管理员为你创建的账号。"}</p></div>
+      <form onSubmit={submit} className="auth-form">
+        {setup && <label><span>昵称</span><input value={nickname} onChange={(event) => setNickname(event.target.value)} placeholder="例如：阿峰的工作室" autoComplete="name" /></label>}
+        <label><span>账号</span><input value={account} onChange={(event) => setAccount(event.target.value.replace(/\s/g, ""))} placeholder="3–32 个字符" autoComplete="username" /></label>
+        <label><span>密码</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder={setup ? "至少 8 个字符" : "输入密码"} autoComplete={setup ? "new-password" : "current-password"} /></label>
+        {setup && <label><span>确认密码</span><input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="再次输入密码" autoComplete="new-password" /></label>}
+        {error && <div className="auth-form-error" role="alert">{error}</div>}
+        <button className="auth-submit" disabled={busy}>{busy ? (setup ? "正在创建…" : "正在登录…") : (setup ? "创建管理员并进入" : "登录")}</button>
+      </form>
+      <p className="auth-footnote">{setup ? "管理员创建完成后，首次设置入口会自动关闭。" : "忘记密码请联系 PrintFlow 管理员。"}</p>
+    </section>
+  </main>;
+}
+
+function WorkspaceApp({ initialUser, onSignedOut }: { initialUser: AuthUser; onSignedOut: () => void }) {
+  const [currentUser, setCurrentUser] = useState(initialUser);
   const [view, setView] = useState<View>("schedule");
   const [projects, setProjects] = useState<Project[]>([]);
   const [settings, setSettings] = useState<ScheduleSettings>(defaultSettings);
@@ -78,6 +161,7 @@ export default function Home() {
   const [activeStarted, setActiveStarted] = useState(false);
   const [loading, setLoading] = useState(true);
   const [printers, setPrinters] = useState<SavedPrinter[]>([]);
+  const [profileOpen, setProfileOpen] = useState(false);
   const reminded = useRef(new Set<string>());
 
   useEffect(() => {
@@ -268,7 +352,13 @@ export default function Home() {
     { id: "printers" as View, icon: "▣", label: "打印机" },
     { id: "rules" as View, icon: "⌇", label: "换盘规则" },
     { id: "notifications" as View, icon: "◌", label: "通知设置" },
+    ...(currentUser.role === "admin" ? [{ id: "users" as View, icon: "♙", label: "用户控制台" }] : []),
   ];
+
+  async function signOut() {
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
+    onSignedOut();
+  }
 
   return (
     <main className="app-shell">
@@ -277,13 +367,13 @@ export default function Home() {
         <nav aria-label="主导航">
           {nav.map((item) => <button key={item.id} className={`nav-item ${view === item.id ? "active" : ""}`} onClick={() => setView(item.id)}><span>{item.icon}</span>{item.label}{item.count !== undefined && <b>{item.count}</b>}</button>)}
         </nav>
-        <div className="side-footer"><div className="avatar">PF</div><div><strong>我的工作室</strong><span>{printerOnline ? "X2D 实时在线" : printers.length ? "X2D 等待桥接" : "打印机待配置"}</span></div><button aria-label="打开打印机设置" onClick={() => setView("printers")}>···</button></div>
+        <div className="side-footer"><div className="avatar">{userInitials(currentUser)}</div><button className="side-profile" onClick={() => setProfileOpen(true)}><strong>{currentUser.nickname}</strong><span>@{currentUser.account} · {currentUser.role === "admin" ? "管理员" : "用户"}</span></button><button aria-label="编辑个人资料" onClick={() => setProfileOpen(true)}>···</button></div>
       </aside>
 
       <section className="workspace">
         <header className="topbar">
           <div><p className="eyebrow">{now.toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "long" })}</p><h1>{view === "schedule" ? schedule.length ? "打印队列已为你优化" : "开始规划你的打印队列" : nav.find((item) => item.id === view)?.label}</h1></div>
-          <div className="top-actions"><button className="icon-button" aria-label="通知" onClick={() => setView("notifications")}>♧{settings.barkKey && <i />}</button><button className="primary-button" onClick={() => setImportOpen(true)}>＋ 导入项目</button></div>
+          <div className="top-actions"><button className="icon-button" aria-label="通知" onClick={() => setView("notifications")}>♧{settings.barkKey && <i />}</button><button className="account-button" aria-label="打开个人资料" onClick={() => setProfileOpen(true)}><span>{userInitials(currentUser)}</span><b>{currentUser.nickname}</b></button><button className="primary-button" onClick={() => setImportOpen(true)}>＋ 导入项目</button></div>
         </header>
 
         {view === "schedule" && <>
@@ -330,6 +420,7 @@ export default function Home() {
         {view === "printers" && <PrintersView printers={printers} onRefresh={(next) => setPrinters(next)} onToast={flash} />}
         {view === "rules" && <RulesView settings={settings} onChange={setSettings} onSave={saveRules} scheduleCount={schedule.length} idleMinutes={idleMinutes} />}
         {view === "notifications" && <NotificationsView settings={settings} onChange={setSettings} onSave={saveRules} onTest={testBark} nextTask={nextTask} printerName={primaryPrinter?.name || "未绑定打印机"} />}
+        {view === "users" && currentUser.role === "admin" && <UsersView onToast={flash} />}
       </section>
 
       {importOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setImportOpen(false)}>
@@ -359,8 +450,134 @@ export default function Home() {
       </div>}
       {toast && <div className="toast">✓ {toast}</div>}
       {loading && <div className="sync-pill">正在同步工作室数据…</div>}
+      {profileOpen && <ProfileModal user={currentUser} onClose={() => setProfileOpen(false)} onSaved={(user) => { setCurrentUser(user); setProfileOpen(false); flash("个人资料已更新"); }} onSignOut={signOut} />}
     </main>
   );
+}
+
+function UsersView({ onToast }: { onToast: (message: string) => void }) {
+  const [users, setUsers] = useState<AuthUser[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [account, setAccount] = useState("");
+  const [nickname, setNickname] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/users", { cache: "no-store" })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "读取用户失败");
+        setUsers(data.users || []);
+      })
+      .catch((loadError) => setError(loadError instanceof Error ? loadError.message : "读取用户失败"))
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function createUser(event: FormEvent) {
+    event.preventDefault();
+    setError("");
+    setSaving(true);
+    try {
+      const response = await fetch("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ account, nickname, password }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "创建用户失败");
+      setUsers((current) => [...current, data.user]);
+      setAccount("");
+      setNickname("");
+      setPassword("");
+      onToast(`用户 ${data.user.nickname} 已创建`);
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : "创建用户失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <div className="user-console-layout">
+    <section className="content-card user-list-card">
+      <div className="content-head"><div><h2>工作室用户</h2><p>查看可登录 PrintFlow 的管理员与普通用户。</p></div><span className="user-count">{users.length} 位用户</span></div>
+      <div className="user-list">
+        {users.map((user) => <article key={user.id} className="user-row"><div className="user-avatar">{userInitials(user)}</div><div><strong>{user.nickname}</strong><span>@{user.account}</span></div><span className={`role-badge ${user.role}`}>{user.role === "admin" ? "管理员" : "用户"}</span><time>{new Date(user.createdAt).toLocaleDateString("zh-CN")}</time></article>)}
+        {!loading && !users.length && !error && <div className="user-empty">暂时没有用户</div>}
+        {loading && <div className="user-empty">正在读取用户…</div>}
+      </div>
+    </section>
+    <section className="content-card add-user-card">
+      <div className="content-head"><div><span className="console-kicker">ADMIN ONLY</span><h2>添加用户</h2><p>新用户创建后即可使用账号密码登录。</p></div></div>
+      <form className="console-form" onSubmit={createUser}>
+        <label><span>昵称</span><input value={nickname} onChange={(event) => setNickname(event.target.value)} placeholder="成员显示名称" autoComplete="off" /></label>
+        <label><span>登录账号</span><input value={account} onChange={(event) => setAccount(event.target.value.replace(/\s/g, ""))} placeholder="3–32 个字符" autoComplete="off" /></label>
+        <label><span>初始密码</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 8 个字符" autoComplete="new-password" /></label>
+        {error && <div className="console-error" role="alert">{error}</div>}
+        <button className="primary-button" disabled={saving}>{saving ? "正在创建…" : "添加用户"}</button>
+      </form>
+      <div className="console-note"><b>权限说明</b><p>新建账号默认为普通用户，可以使用排产、设备与通知功能，但无法访问用户控制台。</p></div>
+    </section>
+  </div>;
+}
+
+function ProfileModal({ user, onClose, onSaved, onSignOut }: { user: AuthUser; onClose: () => void; onSaved: (user: AuthUser) => void; onSignOut: () => void }) {
+  const [nickname, setNickname] = useState(user.nickname);
+  const [account, setAccount] = useState(user.account);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape" && !saving) onClose(); };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", closeOnEscape);
+    return () => { document.body.style.overflow = previousOverflow; window.removeEventListener("keydown", closeOnEscape); };
+  }, [onClose, saving]);
+
+  async function saveProfile(event: FormEvent) {
+    event.preventDefault();
+    setError("");
+    if (newPassword && newPassword !== confirmPassword) return setError("两次输入的新密码不一致");
+    setSaving(true);
+    try {
+      const response = await fetch("/api/auth/profile", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nickname, account, currentPassword, newPassword }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "资料保存失败");
+      onSaved(data.user);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "资料保存失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const sensitiveChange = account.trim().toLocaleLowerCase("en-US") !== user.account || Boolean(newPassword);
+  return <div className="modal-backdrop profile-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !saving && onClose()}>
+    <section className="modal profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title">
+      <div className="modal-head"><div><span>MY ACCOUNT</span><h2 id="profile-title">个人资料</h2></div><button onClick={onClose} disabled={saving} aria-label="关闭">×</button></div>
+      <div className="profile-summary"><div className="profile-avatar">{userInitials({ nickname, account })}</div><div><strong>{nickname || user.nickname}</strong><span>{user.role === "admin" ? "管理员" : "普通用户"} · @{account || user.account}</span></div></div>
+      <form className="profile-form" onSubmit={saveProfile}>
+        <label><span>昵称</span><input value={nickname} onChange={(event) => setNickname(event.target.value)} autoComplete="name" /></label>
+        <label><span>登录账号</span><input value={account} onChange={(event) => setAccount(event.target.value.replace(/\s/g, ""))} autoComplete="username" /></label>
+        <div className="profile-divider"><span>修改密码（可选）</span></div>
+        <label><span>新密码</span><input type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} placeholder="留空则不修改" autoComplete="new-password" /></label>
+        {newPassword && <label><span>确认新密码</span><input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" /></label>}
+        {sensitiveChange && <label className="current-password-field"><span>当前密码</span><input type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} placeholder="修改账号或密码前需要验证" autoComplete="current-password" /></label>}
+        {error && <div className="console-error" role="alert">{error}</div>}
+        <button className="auth-submit" disabled={saving}>{saving ? "正在保存…" : "保存修改"}</button>
+      </form>
+      <button className="signout-button" onClick={onSignOut}>退出当前账号</button>
+    </section>
+  </div>;
 }
 
 function ProjectsView({ projects, onUpdate, onDelete, onImport }: { projects: Project[]; onUpdate: (id: string, patch: Partial<Project>) => void; onDelete: (id: string) => void; onImport: () => void }) {

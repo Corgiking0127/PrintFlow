@@ -1,4 +1,5 @@
 import { MakerWorldDesign, MakerWorldProfileNotFoundError, makerWorldApiHost, parseMakerWorldDesign, requestedMakerWorldProfileId } from "../../../lib/makerworld";
+import { requireUser } from "../../../lib/auth";
 
 function cleanText(value: string) {
   return value.replace(/<[^>]*>/g, " ").replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/\s+/g, " ").trim();
@@ -27,6 +28,8 @@ async function readStructuredProject(target: URL) {
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireUser(request);
+    if ("response" in auth) return auth.response;
     const { url } = (await request.json()) as { url?: string };
     if (!url) return Response.json({ error: "请粘贴 MakerWorld 链接" }, { status: 400 });
     const target = new URL(url);
