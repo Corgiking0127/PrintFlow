@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   configureAdapter,
   getAdapterStatus,
+  requestVerificationCode,
   startAdapterService,
   stopAdapterService,
   VerificationRequiredError,
@@ -65,6 +66,17 @@ const gateway = createServer(async (request, response) => {
   if (url.pathname === "/api/adapter/status") {
     if (request.method === "GET") return sendJson(response, 200, getAdapterStatus());
     return sendJson(response, 405, { error: "请求方法不支持" });
+  }
+  if (url.pathname === "/api/adapter/verification-code") {
+    if (request.method !== "POST") return sendJson(response, 405, { error: "请求方法不支持" });
+    try {
+      const { region, account } = await readJson(request);
+      await requestVerificationCode(region, account);
+      const isEmail = String(account || "").includes("@");
+      return sendJson(response, 200, { ok: true, message: isEmail ? "验证码已发送到账号邮箱" : "验证码已发送到账号手机" });
+    } catch (error) {
+      return sendJson(response, 400, { error: error instanceof Error ? error.message : "验证码发送失败" });
+    }
   }
   if (url.pathname === "/api/adapter/configure") {
     if (request.method !== "POST") return sendJson(response, 405, { error: "请求方法不支持" });

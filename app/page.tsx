@@ -167,14 +167,14 @@ export default function Home() {
     if (!draft.name.trim()) return flash("请填写项目名称");
     const plateCount = Math.max(1, Number(draft.plates));
     const plateDurations = draft.splitByPlate
-      ? Array.from({ length: plateCount }, (_, index) => Math.max(15, Number(draft.plateDurations?.[index]) || Math.ceil(draft.durationMinutes / plateCount)))
+      ? Array.from({ length: plateCount }, (_, index) => Math.max(1, Number(draft.plateDurations?.[index]) || Math.round(draft.durationMinutes / plateCount)))
       : draft.plateDurations || [];
     const project: Project = {
       ...draft,
       id: crypto.randomUUID(),
       name: draft.name.trim(),
       plates: plateCount,
-      durationMinutes: draft.splitByPlate ? plateDurations.reduce((sum, minutes) => sum + minutes, 0) : Math.max(15, Number(draft.durationMinutes)),
+      durationMinutes: draft.splitByPlate ? plateDurations.reduce((sum, minutes) => sum + minutes, 0) : Math.max(1, Number(draft.durationMinutes)),
       plateDurations,
       plateNames: Array.from({ length: plateCount }, (_, index) => draft.plateNames?.[index] || `打印盘 ${index + 1}`),
       splitByPlate: Boolean(draft.splitByPlate),
@@ -322,7 +322,7 @@ export default function Home() {
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="import-title">
           <div className="modal-head"><div><span>MAKERWORLD IMPORT</span><h2 id="import-title">导入打印项目</h2></div><button onClick={() => setImportOpen(false)} aria-label="关闭">×</button></div>
           {!imported ? <form onSubmit={fetchMakerWorld} className="import-step">
-            <label>MakerWorld 网页链接<input type="url" placeholder="https://makerworld.com/zh/models/...#profileId-..." value={draft.sourceUrl} onChange={(event) => setDraft({ ...draft, sourceUrl: event.target.value })} /></label>
+            <label>MakerWorld 网页链接<input type="url" placeholder="https://makerworld.com.cn/zh/models/...#profileId-..." value={draft.sourceUrl} onChange={(event) => setDraft({ ...draft, sourceUrl: event.target.value })} /></label>
             <div className="import-hint"><b>系统将自动获取</b><div><span>✓ 项目名称</span><span>✓ 打印盘数</span><span>✓ 每盘打印时间</span><span>✓ 对应打印 Profile</span></div><p>带 #profileId 的链接会读取对应设备配置，排产时间更准确。</p></div>
             <button className="modal-primary" disabled={importing}>{importing ? "正在读取每盘数据…" : "读取网页并继续 →"}</button>
             <button type="button" className="modal-secondary" onClick={() => { setImportProfile(null); setImported(true); }}>暂时手动录入</button>
@@ -331,7 +331,7 @@ export default function Home() {
             {importProfile && <div className="profile-banner wide"><span>已匹配 Profile</span><strong>{importProfile.printer}</strong><p>{importProfile.title}</p></div>}
             <label className="wide">项目名称<input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
             <label>打印盘数<input type="number" min="1" max="99" value={draft.plates} onChange={(event) => { const plates = Math.max(1, Number(event.target.value)); setDraft({ ...draft, plates, plateDurations: Array.from({ length: plates }, (_, index) => draft.plateDurations?.[index] || Math.ceil(draft.durationMinutes / plates)), plateNames: Array.from({ length: plates }, (_, index) => draft.plateNames?.[index] || `打印盘 ${index + 1}`) }); }} /></label>
-            <label>总打印时间（分钟）<input type="number" min="15" value={draft.durationMinutes} readOnly={draft.splitByPlate} onChange={(event) => setDraft({ ...draft, durationMinutes: Number(event.target.value) })} /></label>
+            <label>总打印时间（分钟）<input type="number" min="1" value={draft.durationMinutes} readOnly={draft.splitByPlate} onChange={(event) => setDraft({ ...draft, durationMinutes: Number(event.target.value) })} /></label>
             <div className="planning-choice wide"><span>排产颗粒度</span><div><button type="button" className={!draft.splitByPlate ? "selected" : ""} onClick={() => setPlanningUnit(false)}><b>整项目排产</b><small>{draft.plates} 个盘作为连续项目</small></button><button type="button" className={draft.splitByPlate ? "selected" : ""} onClick={() => setPlanningUnit(true)}><b>拆分到每盘</b><small>每盘独立穿插到最佳时段</small></button></div></div>
             {draft.splitByPlate && <div className="plate-editor wide"><div className="plate-editor-head"><strong>逐盘打印时间</strong><span>合计 {durationLabel(draft.durationMinutes)}</span></div>{Array.from({ length: draft.plates }, (_, index) => <label key={index}><span><b>盘 {index + 1}</b>{draft.plateNames?.[index] || `打印盘 ${index + 1}`}</span><div><input type="number" min="1" value={draft.plateDurations?.[index] || Math.ceil(draft.durationMinutes / draft.plates)} onChange={(event) => updatePlateDuration(index, Number(event.target.value))} /><i>分钟</i></div></label>)}</div>}
             <label>材料<select value={draft.material} onChange={(event) => setDraft({ ...draft, material: event.target.value })}><option>PLA</option><option>PETG</option><option>ABS</option><option>ASA</option><option>TPU</option></select></label>
@@ -375,6 +375,7 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
   const [verificationCode, setVerificationCode] = useState("");
   const [accessToken, setAccessToken] = useState("");
   const [verificationRequired, setVerificationRequired] = useState(false);
+  const [requestingCode, setRequestingCode] = useState(false);
   const [saving, setSaving] = useState(false);
   const [localAdapter, setLocalAdapter] = useState<LocalAdapterStatus | null>(null);
 
@@ -400,6 +401,29 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
     return () => { active = false; window.clearInterval(timer); };
   }, []);
 
+  async function requestCode() {
+    if (!localAdapter) return onToast("MQTT Adapter 暂时不可用，请检查 PrintFlow 一体服务是否正常运行");
+    if (!account.trim()) return onToast(`请先填写${region === "china" ? "手机号" : "账号邮箱"}`);
+    setRequestingCode(true);
+    try {
+      const response = await fetch("/api/adapter/verification-code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ region, account }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "验证码发送失败");
+      setVerificationRequired(true);
+      setPassword("");
+      setVerificationCode("");
+      onToast(data.message || "验证码已发送，请查收后填写");
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : "验证码发送失败");
+    } finally {
+      setRequestingCode(false);
+    }
+  }
+
   async function savePrinter(event: FormEvent) {
     event.preventDefault();
     if (!localAdapter) return onToast("MQTT Adapter 暂时不可用，请检查 PrintFlow 一体服务是否正常运行");
@@ -407,6 +431,9 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
     const canReuseToken = localAdapter.configured && localAdapter.printer?.region === region;
     if (!canReuseToken && !accessToken.trim() && !account.trim()) {
       return onToast("请填写拓竹账号邮箱或手机号，或使用已有 Access Token");
+    }
+    if (!accessToken.trim() && account.trim() && !password && !verificationCode) {
+      return onToast("请先获取并填写验证码，或填写账号密码");
     }
     setSaving(true);
     try {
@@ -500,10 +527,10 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
           <label><span>设备名称</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：X2D 工作站" /></label>
           <label><span>打印机型号</span><input value="Bambu Lab X2D + AMS 2 Pro" readOnly /></label>
           <label><span>设备序列号</span><input value={serial} onChange={(event) => setSerial(event.target.value.toUpperCase())} placeholder="打印机设置页中的序列号" autoCapitalize="characters" /></label>
-          <label><span>拓竹账号区域</span><select value={region} onChange={(event) => setRegion(event.target.value as CloudRegion)}><option value="global">国际区 · bambulab.com</option><option value="china">中国区 · bambulab.cn</option></select></label>
-          <label><span>拓竹账号</span><input type="text" value={account} onChange={(event) => setAccount(event.target.value.replace(/\s/g, ""))} placeholder={localAdapter?.configured ? "令牌未过期时可留空" : region === "china" ? "手机号，例如 13800138000" : "邮箱，例如 name@example.com"} inputMode={region === "china" ? "tel" : "email"} autoComplete="username" /><small>国际区通常使用邮箱；中国区支持注册手机号。账号不会写入 PrintFlow 数据库。</small></label>
-          <label><span>账号密码（可选）</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder={region === "china" ? "手机号验证码登录可留空" : "仅用于本次登录"} autoComplete="current-password" /><small>留空后点击连接会发送验证码；密码不会保存到磁盘。</small></label>
-          {verificationRequired && <label className="verification-field"><span>短信 / 邮箱验证码</span><input value={verificationCode} onChange={(event) => setVerificationCode(event.target.value.replace(/\s/g, ""))} placeholder="输入拓竹发送的验证码" inputMode="numeric" autoComplete="one-time-code" /><small>验证码验证成功后会自动连接云端 MQTT。</small></label>}
+          <label><span>拓竹账号区域</span><select value={region} onChange={(event) => { setRegion(event.target.value as CloudRegion); setVerificationRequired(false); setVerificationCode(""); }}><option value="global">国际区 · bambulab.com</option><option value="china">中国区 · bambulab.cn</option></select></label>
+          <label><span>拓竹账号</span><div className="cloud-account-input"><input type="text" value={account} onChange={(event) => { setAccount(event.target.value.replace(/\s/g, "")); setVerificationRequired(false); setVerificationCode(""); }} placeholder={localAdapter?.configured ? "令牌未过期时可留空" : region === "china" ? "手机号，例如 13800138000" : "邮箱，例如 name@example.com"} inputMode={region === "china" ? "tel" : "email"} autoComplete="username" /><button type="button" onClick={requestCode} disabled={requestingCode || saving || !localAdapter || !account.trim()}>{requestingCode ? "发送中…" : verificationRequired ? "重新获取" : "获取验证码"}</button></div><small>国际区通常使用邮箱；中国区支持注册手机号。账号不会写入 PrintFlow 数据库。</small></label>
+          <label><span>账号密码（可选）</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder={region === "china" ? "手机号验证码登录可留空" : "仅用于本次登录"} autoComplete="current-password" /><small>使用验证码时请留空；密码不会保存到磁盘。</small></label>
+          {verificationRequired && <label className="verification-field"><span>短信 / 邮箱验证码</span><input value={verificationCode} onChange={(event) => setVerificationCode(event.target.value.replace(/\s/g, ""))} placeholder="输入拓竹发送的验证码" inputMode="numeric" autoComplete="one-time-code" /><small>填写后点击下方“登录并连接云端 MQTT”。</small></label>}
           <details className="cloud-auth-help">
             <summary>高级：使用已有 Access Token</summary>
             <label><span>Access Token</span><input type="password" value={accessToken} onChange={(event) => setAccessToken(event.target.value.trim())} placeholder="已有令牌时可跳过账号密码" autoComplete="off" /></label>

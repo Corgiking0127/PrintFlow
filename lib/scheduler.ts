@@ -101,14 +101,14 @@ export function buildSchedule(projects: Project[], settings: ScheduleSettings, s
     .flatMap((project) => {
       const plateCount = Math.max(1, project.plates);
       if (!project.splitByPlate) {
-        return [{ project, plate: 0, plateName: "整项目", duration: Math.max(15, project.durationMinutes), planningUnit: "project" as const }];
+        return [{ project, plate: 0, plateName: "整项目", duration: Math.max(1, project.durationMinutes), planningUnit: "project" as const }];
       }
-      const average = Math.max(15, Math.ceil(project.durationMinutes / plateCount));
+      const average = Math.max(1, Math.round(project.durationMinutes / plateCount));
       return Array.from({ length: plateCount }, (_, index) => ({
         project,
         plate: index + 1,
         plateName: project.plateNames?.[index] || `打印盘 ${index + 1}`,
-        duration: Math.max(15, project.plateDurations?.[index] || average),
+        duration: Math.max(1, project.plateDurations?.[index] || average),
         planningUnit: "plate" as const,
       }));
     });

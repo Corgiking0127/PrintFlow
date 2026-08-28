@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { buildConfiguration } from "../local/adapter-service.mjs";
+import { buildConfiguration, requestVerificationCode } from "../local/adapter-service.mjs";
 
 const localAdapter = readFileSync(new URL("../local/adapter-service.mjs", import.meta.url), "utf8");
 const localStart = readFileSync(new URL("../local/start.mjs", import.meta.url), "utf8");
@@ -29,6 +29,8 @@ test("printer settings no longer require LAN-only credentials", () => {
   assert.match(pageSource, /\/api\/adapter\/configure/);
   assert.match(pageSource, /中国区支持注册手机号/);
   assert.match(pageSource, /手机号验证码登录可留空/);
+  assert.match(pageSource, /获取验证码/);
+  assert.match(pageSource, /\/api\/adapter\/verification-code/);
   assert.match(pageSource, /Bambu Handy 可继续使用/);
 });
 
@@ -137,11 +139,24 @@ test("China phone account requests an SMS code when the password is blank", asyn
     }), /验证码已发送到账号手机/);
     assert.deepEqual(requests.map(({ url, body }) => ({ host: new URL(url).host, path: new URL(url).pathname, body })), [
       {
-        host: "bambulab.cn",
-        path: "/api/v1/user-service/user/sendsmscode",
+        host: "api.bambulab.cn",
+        path: "/v1/user-service/user/sendsmscode",
         body: { phone: "13800138000", type: "codeLogin" },
       },
     ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("China SMS failures identify verification-code delivery instead of login", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ message: "Forbidden" }, { status: 403 });
+  try {
+    await assert.rejects(
+      () => requestVerificationCode("china", "13800138000"),
+      /无法发送短信验证码：拓竹云端拒绝了请求/,
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

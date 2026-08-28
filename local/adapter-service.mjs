@@ -150,16 +150,27 @@ async function loginToCloud(region, input) {
   return { accessToken, tokenExpiresAt };
 }
 
-async function requestVerificationCode(region, account) {
+export async function requestVerificationCode(region, accountValue) {
+  const account = String(accountValue || "").trim();
+  if (!(region in cloudRegions)) throw new Error("不支持的拓竹账号区域");
+  if (!account) throw new Error("请先填写拓竹账号邮箱或手机号");
+  if (region !== "china" && !account.includes("@")) throw new Error("手机号注册账号请选择中国区");
+  if (!account.includes("@") && !/^\+?\d{6,20}$/.test(account)) throw new Error("手机号格式不正确，请只输入号码和可选的国家区号");
   const isEmail = account.includes("@");
-  const path = isEmail ? "/v1/user-service/user/sendemail/code" : "https://bambulab.cn/api/v1/user-service/user/sendsmscode";
+  const path = isEmail ? "/v1/user-service/user/sendemail/code" : "/v1/user-service/user/sendsmscode";
   const body = isEmail ? { email: account, type: "codeLogin" } : { phone: account, type: "codeLogin" };
   const { response, data } = await cloudRequest(region, path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!response.ok) throw new Error(cloudError(response, data, isEmail ? "无法发送邮箱验证码" : "无法发送短信验证码"));
+  if (!response.ok) {
+    const fallback = isEmail ? "无法发送邮箱验证码" : "无法发送短信验证码";
+    if (response.status === 401 || response.status === 403) {
+      throw new Error(`${fallback}：拓竹云端拒绝了请求，请检查账号区域和${isEmail ? "邮箱" : "手机号"}，或稍后重试`);
+    }
+    throw new Error(cloudError(response, data, fallback));
+  }
 }
 
 async function resolveCloudIdentity(region, serial, accessToken) {
