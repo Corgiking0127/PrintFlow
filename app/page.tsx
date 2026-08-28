@@ -1,16 +1,9 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { buildSchedule, durationLabel, Project, ScheduleSettings, timeLabel } from "../lib/scheduler";
+import { buildSchedule, durationLabel, Project, ScheduledPlate, ScheduleSettings, timeLabel } from "../lib/scheduler";
 import type { SavedPrinter } from "../lib/printers/types";
 import { X2D_AMS2_ADAPTER_ID } from "../lib/printers/types";
-
-const seedProjects: Project[] = [
-  { id: "demo-helmet", name: "星际骑士头盔", sourceUrl: "https://makerworld.com/", plates: 4, durationMinutes: 1360, plateDurations: [310, 385, 298, 367], plateNames: ["面罩", "头盔主体", "后盖", "连接件"], splitByPlate: true, urgent: false, deadline: null, material: "PLA", color: "银灰", status: "queued" },
-  { id: "demo-dragon", name: "机械龙翼组件", sourceUrl: "https://makerworld.com/", plates: 3, durationMinutes: 1098, plateDurations: [362, 401, 335], plateNames: ["左翼", "右翼", "关节"], splitByPlate: true, urgent: false, deadline: null, material: "PETG", color: "黑色", status: "queued" },
-  { id: "demo-softbox", name: "摄影灯柔光罩", sourceUrl: "https://makerworld.com/", plates: 1, durationMinutes: 162, plateDurations: [162], plateNames: ["柔光罩"], splitByPlate: false, urgent: true, deadline: "2026-08-29T20:00", material: "PLA", color: "白色", status: "queued" },
-  { id: "demo-drone", name: "无人机壁挂支架", sourceUrl: "https://makerworld.com/", plates: 2, durationMinutes: 270, plateDurations: [156, 114], plateNames: ["支架", "固定扣"], splitByPlate: false, urgent: false, deadline: "2026-09-01T18:00", material: "PETG", color: "深灰", status: "queued" },
-];
 
 const defaultSettings: ScheduleSettings = {
   weekdayMorning: "08:00-08:30",
@@ -49,7 +42,7 @@ function temperatureLabel(current: number | null | undefined, target?: number | 
 
 export default function Home() {
   const [view, setView] = useState<View>("schedule");
-  const [projects, setProjects] = useState<Project[]>(seedProjects);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [settings, setSettings] = useState<ScheduleSettings>(defaultSettings);
   const [now, setNow] = useState(() => new Date());
   const [importOpen, setImportOpen] = useState(false);
@@ -66,7 +59,7 @@ export default function Home() {
 
   useEffect(() => {
     fetch("/api/state").then((response) => response.ok ? response.json() : Promise.reject()).then((data) => {
-      if (data.projects?.length) setProjects(data.projects);
+      setProjects(Array.isArray(data.projects) ? data.projects : []);
       if (data.settings) setSettings((current) => ({ ...current, ...data.settings }));
     }).catch(() => undefined).finally(() => setLoading(false));
   }, []);
@@ -259,19 +252,19 @@ export default function Home() {
         <nav aria-label="主导航">
           {nav.map((item) => <button key={item.id} className={`nav-item ${view === item.id ? "active" : ""}`} onClick={() => setView(item.id)}><span>{item.icon}</span>{item.label}{item.count !== undefined && <b>{item.count}</b>}</button>)}
         </nav>
-        <div className="side-footer"><div className="avatar">YF</div><div><strong>我的工作室</strong><span>{printerOnline ? "X2D 实时在线" : printers.length ? "X2D 等待桥接" : "打印机待配置"}</span></div><button aria-label="打开打印机设置" onClick={() => setView("printers")}>···</button></div>
+        <div className="side-footer"><div className="avatar">PF</div><div><strong>我的工作室</strong><span>{printerOnline ? "X2D 实时在线" : printers.length ? "X2D 等待桥接" : "打印机待配置"}</span></div><button aria-label="打开打印机设置" onClick={() => setView("printers")}>···</button></div>
       </aside>
 
       <section className="workspace">
         <header className="topbar">
-          <div><p className="eyebrow">{now.toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "long" })}</p><h1>{view === "schedule" ? "打印队列已为你优化" : nav.find((item) => item.id === view)?.label}</h1></div>
+          <div><p className="eyebrow">{now.toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "long" })}</p><h1>{view === "schedule" ? schedule.length ? "打印队列已为你优化" : "开始规划你的打印队列" : nav.find((item) => item.id === view)?.label}</h1></div>
           <div className="top-actions"><button className="icon-button" aria-label="通知" onClick={() => setView("notifications")}>♧{settings.barkKey && <i />}</button><button className="primary-button" onClick={() => setImportOpen(true)}>＋ 导入项目</button></div>
         </header>
 
         {view === "schedule" && <>
           <section className="notice-card">
             <div className="notice-icon">✦</div>
-            <div><strong>智能排产已减少 {durationLabel(idleMinutes)} 的等待</strong><p>已拆分项目按每盘真实时长穿插排产；整项目仍作为一个连续任务，并为加急与 DDL 保留缓冲。</p></div>
+            <div><strong>{schedule.length ? `智能排产已减少 ${durationLabel(idleMinutes)} 的等待` : "还没有排产任务"}</strong><p>{schedule.length ? "已拆分项目按每盘真实时长穿插排产；整项目仍作为一个连续任务，并为加急与 DDL 保留缓冲。" : "导入真实 MakerWorld 项目后，系统会根据换盘时间、加急和 DDL 自动生成队列。"}</p></div>
             <button onClick={() => setView("rules")}>调整排产逻辑 →</button>
           </section>
 
@@ -286,7 +279,7 @@ export default function Home() {
 
           <div className="schedule-layout">
             <section className="queue-panel">
-              <div className="panel-head"><div><h2>智能排产队列</h2><p>P1S-01 · {schedule.length} 个排产单元</p></div><div className="panel-actions"><button className="export-button" onClick={exportQueue}>导出</button><div className="segmented"><button className={queueMode === "timeline" ? "selected" : ""} onClick={() => setQueueMode("timeline")}>时间轴</button><button className={queueMode === "list" ? "selected" : ""} onClick={() => setQueueMode("list")}>列表</button></div></div></div>
+              <div className="panel-head"><div><h2>智能排产队列</h2><p>{primaryPrinter?.name || "未绑定打印机"} · {schedule.length} 个排产单元</p></div><div className="panel-actions"><button className="export-button" onClick={exportQueue}>导出</button><div className="segmented"><button className={queueMode === "timeline" ? "selected" : ""} onClick={() => setQueueMode("timeline")}>时间轴</button><button className={queueMode === "list" ? "selected" : ""} onClick={() => setQueueMode("list")}>列表</button></div></div></div>
               <div className={`queue-list ${queueMode === "list" ? "compact" : ""}`}>
                 {schedule.slice(0, queueMode === "timeline" ? 8 : 20).map((item, index) => <article className="queue-item" key={item.id}>
                   <div className="queue-time">{timeLabel(item.start)} — {timeLabel(item.end)}</div>
@@ -311,7 +304,7 @@ export default function Home() {
         {view === "projects" && <ProjectsView projects={projects} onUpdate={updateProject} onDelete={deleteProject} onImport={() => setImportOpen(true)} />}
         {view === "printers" && <PrintersView printers={printers} onRefresh={(next) => setPrinters(next)} onToast={flash} />}
         {view === "rules" && <RulesView settings={settings} onChange={setSettings} onSave={saveRules} scheduleCount={schedule.length} idleMinutes={idleMinutes} />}
-        {view === "notifications" && <NotificationsView settings={settings} onChange={setSettings} onSave={saveRules} onTest={testBark} />}
+        {view === "notifications" && <NotificationsView settings={settings} onChange={setSettings} onSave={saveRules} onTest={testBark} nextTask={nextTask} printerName={primaryPrinter?.name || "未绑定打印机"} />}
       </section>
 
       {importOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setImportOpen(false)}>
@@ -501,6 +494,8 @@ function RulesView({ settings, onChange, onSave, scheduleCount, idleMinutes }: {
   return <div className="settings-layout"><section className="content-card"><div className="content-head"><div><h2>可换盘时间</h2><p>系统会选择让打印恰好在这些时间附近结束的任务。</p></div></div><div className="rules-grid"><label><span>工作日 · 早晨</span><input value={settings.weekdayMorning} onChange={(event) => field("weekdayMorning", event.target.value)} /><small>默认上班前可换一次</small></label><label><span>工作日 · 中午</span><input value={settings.weekdayNoon} onChange={(event) => field("weekdayNoon", event.target.value)} /><small>默认午休可换一次</small></label><label><span>工作日 · 晚间</span><input value={settings.weekdayEvening} onChange={(event) => field("weekdayEvening", event.target.value)} /><small>长任务会优先占用夜间</small></label><label><span>休息日</span><input value={settings.weekend} onChange={(event) => field("weekend", event.target.value)} /><small>默认白天随时可换盘</small></label></div><div className="rule-divider" /><div className="slider-row"><div><strong>失败与准备缓冲</strong><p>在 DDL 前预留切片、冷却、失败重打时间。</p></div><input type="range" min="0" max="30" value={settings.failureBuffer} onChange={(event) => field("failureBuffer", Number(event.target.value))} /><b>{settings.failureBuffer}%</b></div><div className="switch-row"><span><strong>未按时开始时自动重排</strong><small>超过阈值后，优先安排最能利用当前空档的项目。</small></span><input id="auto-reschedule" aria-label="未按时开始时自动重排" type="checkbox" checked={settings.autoReschedule} onChange={(event) => field("autoReschedule", event.target.checked)} /></div><button className="primary-button save-rules" onClick={onSave}>保存并重新计算队列</button></section><aside className="rule-preview"><span>规则影响预览</span><strong>{scheduleCount}</strong><p>个排产单元已自动编排</p><div><span>预计空闲</span><b>{durationLabel(idleMinutes)}</b></div><div><span>夜间策略</span><b>长任务优先</b></div><div><span>工作日换盘</span><b>3 个窗口</b></div></aside></div>;
 }
 
-function NotificationsView({ settings, onChange, onSave, onTest }: { settings: ScheduleSettings; onChange: (value: ScheduleSettings) => void; onSave: () => void; onTest: () => void }) {
-  return <div className="settings-layout"><section className="content-card"><div className="content-head"><div><h2>Bark 通知</h2><p>在 iPhone 上安装 Bark，复制 Key 即可接收换盘提醒。</p></div><span className={`connection ${settings.barkKey ? "connected" : ""}`}>{settings.barkKey ? "已配置" : "未连接"}</span></div><label className="settings-field"><span>Bark Key</span><div className="input-action"><input type="password" placeholder="例如：AbCdEf123456" value={settings.barkKey} onChange={(event) => onChange({ ...settings, barkKey: event.target.value })} /><button onClick={onTest}>发送测试</button></div><small>Key 仅用于向 api.day.app 发送你的打印提醒。</small></label><div className="rule-divider" /><div className="rules-grid"><label><span>提前提醒</span><input type="number" min="1" max="120" value={settings.reminderMinutes} onChange={(event) => onChange({ ...settings, reminderMinutes: Number(event.target.value) })} /><small>分钟</small></label><label><span>逾期阈值</span><input type="number" min="5" max="180" value={settings.overdueMinutes} onChange={(event) => onChange({ ...settings, overdueMinutes: Number(event.target.value) })} /><small>超过后建议重排</small></label></div><div className="notification-samples"><div><span>即将换盘</span><p>下一盘开始前提醒，并显示项目、盘号和设备。</p><i>开启</i></div><div><span>任务逾期</span><p>未确认开始时提醒，页面打开时自动重排。</p><i>开启</i></div><div><span>DDL 风险</span><p>失败缓冲不足或预计延期时立即提醒。</p><i>开启</i></div></div><button className="primary-button save-rules" onClick={onSave}>保存通知设置</button></section><aside className="phone-preview"><div className="phone-notch" /><span>现在</span><div className="bark-preview"><b>PRINTFLOW</b><strong>该换盘了</strong><p>机械龙翼组件 · 第 2/3 盘<br />P1S-01 · 预计打印 6h 06m</p></div><small>提前 {settings.reminderMinutes} 分钟提醒</small></aside></div>;
+function NotificationsView({ settings, onChange, onSave, onTest, nextTask, printerName }: { settings: ScheduleSettings; onChange: (value: ScheduleSettings) => void; onSave: () => void; onTest: () => void; nextTask?: ScheduledPlate; printerName: string }) {
+  const taskLabel = nextTask ? nextTask.planningUnit === "plate" ? `${nextTask.projectName} · 第 ${nextTask.plate}/${nextTask.plateCount} 盘` : `${nextTask.projectName} · 整项目` : "暂无待执行任务";
+  const detailLabel = nextTask ? `${printerName} · 预计打印 ${durationLabel(nextTask.durationMinutes)}` : `${printerName} · 导入项目后显示提醒内容`;
+  return <div className="settings-layout"><section className="content-card"><div className="content-head"><div><h2>Bark 通知</h2><p>在 iPhone 上安装 Bark，复制 Key 即可接收换盘提醒。</p></div><span className={`connection ${settings.barkKey ? "connected" : ""}`}>{settings.barkKey ? "已配置" : "未连接"}</span></div><label className="settings-field"><span>Bark Key</span><div className="input-action"><input type="password" placeholder="例如：AbCdEf123456" value={settings.barkKey} onChange={(event) => onChange({ ...settings, barkKey: event.target.value })} /><button onClick={onTest}>发送测试</button></div><small>Key 仅用于向 api.day.app 发送你的打印提醒。</small></label><div className="rule-divider" /><div className="rules-grid"><label><span>提前提醒</span><input type="number" min="1" max="120" value={settings.reminderMinutes} onChange={(event) => onChange({ ...settings, reminderMinutes: Number(event.target.value) })} /><small>分钟</small></label><label><span>逾期阈值</span><input type="number" min="5" max="180" value={settings.overdueMinutes} onChange={(event) => onChange({ ...settings, overdueMinutes: Number(event.target.value) })} /><small>超过后建议重排</small></label></div><div className="notification-samples"><div><span>即将换盘</span><p>下一盘开始前提醒，并显示项目、盘号和设备。</p><i>开启</i></div><div><span>任务逾期</span><p>未确认开始时提醒，页面打开时自动重排。</p><i>开启</i></div><div><span>DDL 风险</span><p>失败缓冲不足或预计延期时立即提醒。</p><i>开启</i></div></div><button className="primary-button save-rules" onClick={onSave}>保存通知设置</button></section><aside className="phone-preview"><div className="phone-notch" /><span>现在</span><div className="bark-preview"><b>PRINTFLOW</b><strong>该换盘了</strong><p>{taskLabel}<br />{detailLabel}</p></div><small>提前 {settings.reminderMinutes} 分钟提醒</small></aside></div>;
 }

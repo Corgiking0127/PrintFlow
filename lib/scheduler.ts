@@ -160,7 +160,7 @@ export function buildSchedule(projects: Project[], settings: ScheduleSettings, s
 export function durationLabel(minutes: number) {
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
-  return `${hours ? `${hours}h ` : ""}${mins ? `${mins}m` : ""}`.trim();
+  return `${hours ? `${hours}h ` : ""}${mins ? `${mins}m` : ""}`.trim() || "0m";
 }
 
 export function timeLabel(date: Date) {
