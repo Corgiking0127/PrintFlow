@@ -16,6 +16,15 @@ const cloudRegions = {
   china: { label: "中国区", apiHost: "api.bambulab.cn", mqttHost: "cn.mqtt.bambulab.com" },
 };
 
+const bambuClientHeaders = {
+  "User-Agent": "bambu_network_agent/01.09.05.01",
+  "X-BBL-Client-Name": "OrcaSlicer",
+  "X-BBL-Client-Type": "slicer",
+  "X-BBL-Client-Version": "01.09.05.51",
+  "X-BBL-Language": "zh-CN",
+  "X-BBL-OS-Type": "linux",
+};
+
 let configuration = null;
 let client = null;
 let latestPayload = null;
@@ -28,7 +37,7 @@ let lastError = "";
 let forwardTimer = null;
 
 class VerificationRequiredError extends Error {
-  constructor(message = "拓竹账号要求邮箱验证码，请查收邮件后填写验证码") {
+  constructor(message = "拓竹账号要求验证码，请查收短信或邮件后填写验证码") {
     super(message);
     this.name = "VerificationRequiredError";
   }
@@ -125,10 +134,11 @@ function cloudError(response, data, fallback) {
 
 async function cloudRequest(region, path, options = {}) {
   const endpoint = cloudRegions[region];
-  const response = await fetch(`https://${endpoint.apiHost}${path}`, {
+  const url = path.startsWith("https://") ? path : `https://${endpoint.apiHost}${path}`;
+  const response = await fetch(url, {
     ...options,
     signal: options.signal || AbortSignal.timeout(15000),
-    headers: { "Accept": "application/json", ...(options.headers || {}) },
+    headers: { ...bambuClientHeaders, "Accept": "application/json", ...(options.headers || {}) },
   });
   let data = null;
   try {
@@ -146,7 +156,14 @@ async function loginToCloud(region, input) {
   const account = String(input.account || "").trim();
   const password = String(input.password || "");
   const verificationCode = String(input.verificationCode || "").trim();
-  if (!account || (!password && !verificationCode)) throw new Error("请填写拓竹账号与密码，或使用已有 Access Token");
+  if (!account) throw new Error("请填写拓竹账号邮箱或手机号，或使用已有 Access Token");
+  if (region !== "china" && !account.includes("@")) throw new Error("手机号注册账号请选择中国区");
+  if (!account.includes("@") && !/^\+?\d{6,20}$/.test(account)) throw new Error("手机号格式不正确，请只输入号码和可选的国家区号");
+
+  if (!password && !verificationCode) {
+    await requestVerificationCode(region, account);
+    throw new VerificationRequiredError(account.includes("@") ? "验证码已发送到账号邮箱，请填写后再次连接" : "验证码已发送到账号手机，请填写后再次连接");
+  }
 
   const loginBody = verificationCode ? { account, code: verificationCode } : { account, password };
   const { response, data } = await cloudRequest(region, "/v1/user-service/user/login", {
@@ -155,11 +172,28 @@ async function loginToCloud(region, input) {
     body: JSON.stringify(loginBody),
   });
   const accessToken = data && typeof data === "object" ? String(data.accessToken || "").trim() : "";
-  if (!accessToken && data?.loginType === "verifyCode") throw new VerificationRequiredError();
+  if (!accessToken && data?.loginType === "verifyCode") {
+    await requestVerificationCode(region, account);
+    throw new VerificationRequiredError(account.includes("@") ? "验证码已发送到账号邮箱，请填写后再次连接" : "验证码已发送到账号手机，请填写后再次连接");
+  }
+  if (!accessToken && Number(data?.code) === 1) throw new VerificationRequiredError("验证码已过期，请重新获取");
+  if (!accessToken && Number(data?.code) === 2) throw new VerificationRequiredError("验证码不正确，请检查后重试");
   if (!response.ok || !accessToken) throw new Error(cloudError(response, data, "无法登录拓竹云端"));
   const expiresIn = Number(data.expiresIn);
   const tokenExpiresAt = Number.isFinite(expiresIn) && expiresIn > 0 ? new Date(Date.now() + expiresIn * 1000).toISOString() : null;
   return { accessToken, tokenExpiresAt };
+}
+
+async function requestVerificationCode(region, account) {
+  const isEmail = account.includes("@");
+  const path = isEmail ? "/v1/user-service/user/sendemail/code" : "https://bambulab.cn/api/v1/user-service/user/sendsmscode";
+  const body = isEmail ? { email: account, type: "codeLogin" } : { phone: account, type: "codeLogin" };
+  const { response, data } = await cloudRequest(region, path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(cloudError(response, data, isEmail ? "无法发送邮箱验证码" : "无法发送短信验证码"));
 }
 
 async function resolveCloudIdentity(region, serial, accessToken) {

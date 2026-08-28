@@ -19,7 +19,8 @@ test("integrated adapter uses the Bambu cloud MQTT brokers with verified TLS", (
 test("printer settings no longer require LAN-only credentials", () => {
   assert.doesNotMatch(pageSource, /LAN Access Code/);
   assert.doesNotMatch(pageSource, /局域网地址/);
-  assert.match(pageSource, /拓竹账号密码/);
+  assert.match(pageSource, /中国区支持注册手机号/);
+  assert.match(pageSource, /手机号验证码登录可留空/);
   assert.match(pageSource, /Bambu Handy 可继续使用/);
 });
 
@@ -64,9 +65,17 @@ test("cloud token is resolved to a user id and checked against bound printers", 
   }
 });
 
-test("email verification is surfaced without persisting a password", async () => {
+test("password login can request email verification without persisting a password", async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => Response.json({ loginType: "verifyCode" });
+  const requests: Array<{ url: string; body: unknown }> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    requests.push({ url, body });
+    if (url.endsWith("/v1/user-service/user/login")) return Response.json({ loginType: "verifyCode" });
+    if (url.endsWith("/v1/user-service/user/sendemail/code")) return Response.json({ success: true });
+    throw new Error(`unexpected request: ${url}`);
+  };
   try {
     await assert.rejects(() => buildConfiguration({
       name: "X2D 工作站",
@@ -78,7 +87,77 @@ test("email verification is surfaced without persisting a password", async () =>
       printerId: "printer-1",
       bridgeToken: "bridge-token",
       adapter: "bambu-x2d-ams2pro",
-    }), /邮箱验证码/);
+    }), /验证码已发送到账号邮箱/);
+    assert.deepEqual(requests.map(({ url, body }) => ({ path: new URL(url).pathname, body })), [
+      { path: "/v1/user-service/user/login", body: { account: "owner@example.com", password: "not-saved" } },
+      { path: "/v1/user-service/user/sendemail/code", body: { email: "owner@example.com", type: "codeLogin" } },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("China phone account requests an SMS code when the password is blank", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; body: unknown }> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    requests.push({ url, body });
+    return Response.json({ success: true });
+  };
+  try {
+    await assert.rejects(() => buildConfiguration({
+      name: "X2D 工作站",
+      serial: "X2D123456",
+      region: "china",
+      account: "13800138000",
+      siteUrl: "http://localhost:8082",
+      printerId: "printer-1",
+      bridgeToken: "bridge-token",
+      adapter: "bambu-x2d-ams2pro",
+    }), /验证码已发送到账号手机/);
+    assert.deepEqual(requests.map(({ url, body }) => ({ host: new URL(url).host, path: new URL(url).pathname, body })), [
+      {
+        host: "bambulab.cn",
+        path: "/api/v1/user-service/user/sendsmscode",
+        body: { phone: "13800138000", type: "codeLogin" },
+      },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("China phone verification code produces a token-only saved configuration", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/v1/user-service/user/login")) {
+      assert.deepEqual(JSON.parse(String(init?.body)), { account: "13800138000", code: "654321" });
+      return Response.json({ accessToken: "b".repeat(32), expiresIn: 3600 });
+    }
+    if (url.endsWith("/v1/design-user-service/my/preference")) return Response.json({ uid: 987654321 });
+    if (url.endsWith("/v1/iot-service/api/user/bind")) return Response.json({ devices: [{ dev_id: "X2D123456" }] });
+    throw new Error(`unexpected request: ${url}`);
+  };
+  try {
+    const config = await buildConfiguration({
+      name: "X2D 工作站",
+      serial: "X2D123456",
+      region: "china",
+      account: "13800138000",
+      verificationCode: "654321",
+      siteUrl: "http://localhost:8082",
+      printerId: "printer-1",
+      bridgeToken: "bridge-token",
+      adapter: "bambu-x2d-ams2pro",
+    });
+    assert.equal(config.userId, "987654321");
+    assert.equal(config.accessToken, "b".repeat(32));
+    assert.equal("account" in config, false);
+    assert.equal("password" in config, false);
+    assert.equal("verificationCode" in config, false);
   } finally {
     globalThis.fetch = originalFetch;
   }

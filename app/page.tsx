@@ -412,8 +412,8 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
     if (!localAdapter) return onToast("本地 Adapter 暂时不可用，请使用 npm run local 启动完整服务");
     if (!serial.trim()) return onToast("请填写打印机序列号");
     const canReuseToken = localAdapter.configured && localAdapter.printer?.region === region;
-    if (!canReuseToken && !accessToken.trim() && (!account.trim() || (!password && !verificationCode.trim()))) {
-      return onToast("请填写拓竹账号与密码，或使用已有 Access Token");
+    if (!canReuseToken && !accessToken.trim() && !account.trim()) {
+      return onToast("请填写拓竹账号邮箱或手机号，或使用已有 Access Token");
     }
     setSaving(true);
     try {
@@ -509,9 +509,9 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
           <label><span>打印机型号</span><input value="Bambu Lab X2D + AMS 2 Pro" readOnly /></label>
           <label><span>设备序列号</span><input value={serial} onChange={(event) => setSerial(event.target.value.toUpperCase())} placeholder="打印机设置页中的序列号" autoCapitalize="characters" /></label>
           <label><span>拓竹账号区域</span><select value={region} onChange={(event) => setRegion(event.target.value as CloudRegion)}><option value="global">国际区 · bambulab.com</option><option value="china">中国区 · bambulab.cn</option></select></label>
-          <label><span>拓竹账号邮箱</span><input type="email" value={account} onChange={(event) => setAccount(event.target.value)} placeholder={localAdapter?.configured ? "令牌未过期时可留空" : "name@example.com"} autoComplete="username" /><small>仅在登录时由本机 Adapter 发送给拓竹云端，不会写入 PrintFlow 数据库。</small></label>
-          <label><span>拓竹账号密码</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder={localAdapter?.configured ? "重新登录时填写" : "仅用于本次登录"} autoComplete="current-password" /><small>密码不会保存到磁盘；登录成功后只保存云端 Access Token。</small></label>
-          {verificationRequired && <label className="verification-field"><span>邮箱验证码</span><input value={verificationCode} onChange={(event) => setVerificationCode(event.target.value.replace(/\s/g, ""))} placeholder="输入拓竹发送的验证码" inputMode="numeric" autoComplete="one-time-code" /><small>验证码验证成功后会自动连接云端 MQTT。</small></label>}
+          <label><span>拓竹账号</span><input type="text" value={account} onChange={(event) => setAccount(event.target.value.replace(/\s/g, ""))} placeholder={localAdapter?.configured ? "令牌未过期时可留空" : region === "china" ? "手机号，例如 13800138000" : "邮箱，例如 name@example.com"} inputMode={region === "china" ? "tel" : "email"} autoComplete="username" /><small>国际区通常使用邮箱；中国区支持注册手机号。账号不会写入 PrintFlow 数据库。</small></label>
+          <label><span>账号密码（可选）</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder={region === "china" ? "手机号验证码登录可留空" : "仅用于本次登录"} autoComplete="current-password" /><small>留空后点击连接会发送验证码；密码不会保存到磁盘。</small></label>
+          {verificationRequired && <label className="verification-field"><span>短信 / 邮箱验证码</span><input value={verificationCode} onChange={(event) => setVerificationCode(event.target.value.replace(/\s/g, ""))} placeholder="输入拓竹发送的验证码" inputMode="numeric" autoComplete="one-time-code" /><small>验证码验证成功后会自动连接云端 MQTT。</small></label>}
           <details className="cloud-auth-help">
             <summary>高级：使用已有 Access Token</summary>
             <label><span>Access Token</span><input type="password" value={accessToken} onChange={(event) => setAccessToken(event.target.value.trim())} placeholder="已有令牌时可跳过账号密码" autoComplete="off" /></label>

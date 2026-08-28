@@ -31,11 +31,11 @@ npm run local
 
 1. 确保 X2D 已在 Bambu Handy 中绑定，并保持 LAN Only 关闭。
 2. 在 PrintFlow“打印机”页面选择国际区或中国区。
-3. 填写拓竹账号邮箱、密码和打印机序列号。
-4. 如果出现邮箱验证码提示，查收验证码并再次保存。
+3. 中国区填写注册手机号，密码留空；国际区填写账号邮箱，可填写密码或使用验证码。
+4. 密码留空时，第一次保存会向账号手机或邮箱发送验证码；填写验证码后再次保存。
 5. 页面显示“云端已连接”后，实时状态会自动同步。
 
-密码和验证码仅用于当次登录，不会写入配置文件。Adapter 会保存 Access Token 供重启后继续连接；Token 失效后重新登录即可。云端 MQTT 是社区兼容协议，参考：<https://github.com/Doridian/OpenBambuAPI/blob/main/mqtt.md>
+账号、密码和验证码仅用于当次登录，不会写入配置文件。Adapter 会保存 Access Token 供重启后继续连接；Token 失效后重新登录即可。云端 MQTT 是社区兼容协议，参考：<https://github.com/Doridian/OpenBambuAPI/blob/main/mqtt.md>
 
 ## 3. 本地端口与持久化
 
@@ -133,7 +133,7 @@ tar -czf printflow-data-backup.tar.gz -C /opt/printflow .data
 sudo systemctl start printflow
 ```
 
-`.data/printer-config.json` 包含拓竹 Access Token 和 PrintFlow 内部凭证，备份必须加密并限制访问。它不包含拓竹账号密码。恢复时将 `.data/` 放回项目根目录，确认所有者为 `printflow:printflow` 后启动服务。
+`.data/printer-config.json` 包含拓竹 Access Token 和 PrintFlow 内部凭证，备份必须加密并限制访问。它不包含拓竹账号、密码或验证码。恢复时将 `.data/` 放回项目根目录，确认所有者为 `printflow:printflow` 后启动服务。
 
 ## 7. Sites 页面限制
 
