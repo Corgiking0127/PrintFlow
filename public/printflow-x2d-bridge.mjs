@@ -1,9 +1,9 @@
 import mqtt from "mqtt";
 
 const required = [
-  "PRINTER_HOST",
+  "BAMBU_USER_ID",
+  "BAMBU_ACCESS_TOKEN",
   "PRINTER_SERIAL",
-  "PRINTER_ACCESS_CODE",
   "PRINTFLOW_SITE_URL",
   "PRINTFLOW_PRINTER_ID",
   "PRINTFLOW_BRIDGE_TOKEN",
@@ -16,7 +16,8 @@ if (missing.length) {
   process.exit(1);
 }
 
-const host = process.env.PRINTER_HOST;
+const region = process.env.BAMBU_REGION === "china" ? "china" : "global";
+const host = region === "china" ? "cn.mqtt.bambulab.com" : "us.mqtt.bambulab.com";
 const serial = process.env.PRINTER_SERIAL;
 const siteUrl = process.env.PRINTFLOW_SITE_URL.replace(/\/$/, "");
 const printerId = process.env.PRINTFLOW_PRINTER_ID;
@@ -58,17 +59,17 @@ async function forwardLatest() {
 const client = mqtt.connect({
   protocol: "mqtts",
   host,
-  port: Number(process.env.PRINTER_MQTT_PORT || 8883),
-  username: "bblp",
-  password: process.env.PRINTER_ACCESS_CODE,
-  rejectUnauthorized: false,
-  reconnectPeriod: 5000,
-  connectTimeout: 12000,
-  clientId: `printflow_${Math.random().toString(16).slice(2, 10)}`,
+  port: 8883,
+  username: `u_${process.env.BAMBU_USER_ID}`,
+  password: process.env.BAMBU_ACCESS_TOKEN,
+  rejectUnauthorized: true,
+  reconnectPeriod: 10000,
+  connectTimeout: 15000,
+  clientId: `printflow_cloud_${Math.random().toString(16).slice(2, 10)}`,
 });
 
 client.on("connect", () => {
-  console.log(`已连接 ${process.env.PRINTER_NAME || "X2D"}，正在监听只读状态…`);
+  console.log(`已连接拓竹${region === "china" ? "中国区" : "国际区"}云端，正在监听 ${process.env.PRINTER_NAME || "X2D"}…`);
   client.subscribe(reportTopic, { qos: 0 }, (error) => {
     if (error) console.error(`订阅失败：${error.message}`);
     else console.log(`已订阅 ${reportTopic}`);
@@ -84,8 +85,8 @@ client.on("message", (_topic, message) => {
   }
 });
 
-client.on("reconnect", () => console.log("正在重新连接打印机…"));
-client.on("error", (error) => console.error(`MQTT 连接错误：${error.message}`));
+client.on("reconnect", () => console.log("正在重新连接拓竹云端 MQTT…"));
+client.on("error", (error) => console.error(`云端 MQTT 连接错误：${error.message}`));
 
 setInterval(() => void forwardLatest(), 4000);
 

@@ -38,9 +38,9 @@ export async function POST(request: Request) {
 
     const name = String(payload.name || "X2D 工作站").trim();
     const serial = String(payload.serial || "").trim().toUpperCase();
-    const localIp = String(payload.localIp || "").trim();
+    const localIp = String(payload.connectionHost || payload.localIp || "").trim();
     const adapter = String(payload.adapter || X2D_AMS2_ADAPTER_ID);
-    if (!serial || !localIp) return Response.json({ error: "请填写序列号和局域网地址" }, { status: 400 });
+    if (!serial || !localIp) return Response.json({ error: "缺少打印机序列号或云端节点" }, { status: 400 });
     if (!/^[A-Z0-9_-]{6,32}$/.test(serial)) return Response.json({ error: "打印机序列号格式不正确" }, { status: 400 });
     if (adapter !== X2D_AMS2_ADAPTER_ID) return Response.json({ error: "当前仅支持 X2D + AMS 2 Pro 适配器" }, { status: 400 });
 

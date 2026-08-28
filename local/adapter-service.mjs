@@ -1,0 +1,343 @@
+import { createServer } from "node:http";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import mqtt from "mqtt";
+
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const dataDirectory = resolve(process.env.PRINTFLOW_LOCAL_DATA_DIR || resolve(projectRoot, ".data"));
+const configPath = resolve(dataDirectory, "printer-config.json");
+const controlPort = Number(process.env.PRINTFLOW_ADAPTER_PORT || 8790);
+const webPort = Number(process.env.PRINTFLOW_WEB_PORT || 8082);
+const allowedOrigins = new Set((process.env.PRINTFLOW_LOCAL_ORIGINS || `http://localhost:${webPort},http://127.0.0.1:${webPort}`).split(",").map((value) => value.trim()).filter(Boolean));
+
+const cloudRegions = {
+  global: { label: "国际区", apiHost: "api.bambulab.com", mqttHost: "us.mqtt.bambulab.com" },
+  china: { label: "中国区", apiHost: "api.bambulab.cn", mqttHost: "cn.mqtt.bambulab.com" },
+};
+
+let configuration = null;
+let client = null;
+let latestPayload = null;
+let sending = false;
+let lastSentAt = 0;
+let connected = false;
+let lastMessageAt = null;
+let lastForwardAt = null;
+let lastError = "";
+let forwardTimer = null;
+
+class VerificationRequiredError extends Error {
+  constructor(message = "拓竹账号要求邮箱验证码，请查收邮件后填写验证码") {
+    super(message);
+    this.name = "VerificationRequiredError";
+  }
+}
+
+function publicStatus() {
+  const region = configuration ? cloudRegions[configuration.region] : null;
+  return {
+    mode: "cloud-mqtt",
+    configured: Boolean(configuration),
+    connected,
+    lastMessageAt,
+    lastForwardAt,
+    lastError,
+    tokenExpiresAt: configuration?.tokenExpiresAt || null,
+    printer: configuration ? {
+      name: configuration.name,
+      serial: configuration.serial,
+      adapter: configuration.adapter,
+      region: configuration.region,
+      regionLabel: region.label,
+      broker: region.mqttHost,
+    } : null,
+  };
+}
+
+function corsHeaders(origin) {
+  return {
+    "Access-Control-Allow-Origin": allowedOrigins.has(origin) ? origin : `http://localhost:${webPort}`,
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Private-Network": "true",
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json; charset=utf-8",
+    "Vary": "Origin",
+  };
+}
+
+function sendJson(response, status, body, origin = "") {
+  response.writeHead(status, corsHeaders(origin));
+  response.end(JSON.stringify(body));
+}
+
+async function readJson(request) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > 65536) throw new Error("配置内容过大");
+    chunks.push(chunk);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function validateBaseConfiguration(input) {
+  const value = input && typeof input === "object" ? input : {};
+  const name = String(value.name || "X2D 工作站").trim();
+  const serial = String(value.serial || "").trim().toUpperCase();
+  const region = String(value.region || "global");
+  const siteUrl = String(value.siteUrl || "").replace(/\/$/, "");
+  const printerId = String(value.printerId || "").trim();
+  const bridgeToken = String(value.bridgeToken || "").trim();
+  const adapter = String(value.adapter || "bambu-x2d-ams2pro");
+
+  if (!/^[A-Z0-9_-]{6,32}$/.test(serial)) throw new Error("打印机序列号格式不正确");
+  if (!(region in cloudRegions)) throw new Error("不支持的拓竹账号区域");
+  if (!printerId || !bridgeToken) throw new Error("缺少 PrintFlow 本地连接凭证");
+  if (adapter !== "bambu-x2d-ams2pro") throw new Error("当前仅支持 X2D + AMS 2 Pro 适配器");
+
+  const target = new URL(siteUrl);
+  if (target.protocol !== "http:" || !["localhost", "127.0.0.1"].includes(target.hostname)) {
+    throw new Error("本地一体模式只接受 localhost 页面");
+  }
+
+  return { name, serial, region, siteUrl, printerId, bridgeToken, adapter };
+}
+
+function validateStoredConfiguration(input) {
+  const base = validateBaseConfiguration(input);
+  const value = input && typeof input === "object" ? input : {};
+  const userId = String(value.userId || "").trim();
+  const accessToken = String(value.accessToken || "").trim();
+  const tokenExpiresAt = value.tokenExpiresAt ? String(value.tokenExpiresAt) : null;
+  if (!/^\d+$/.test(userId)) throw new Error("拓竹云端用户 ID 无效，请重新登录");
+  if (accessToken.length < 20) throw new Error("拓竹云端访问令牌无效，请重新登录");
+  return { ...base, userId, accessToken, tokenExpiresAt };
+}
+
+function cloudError(response, data, fallback) {
+  const detail = data && typeof data === "object" ? String(data.message || data.error || "").trim() : "";
+  if (response.status === 401 || response.status === 403) return "拓竹云端认证失败，请重新登录";
+  return detail && detail.length < 160 ? detail : fallback;
+}
+
+async function cloudRequest(region, path, options = {}) {
+  const endpoint = cloudRegions[region];
+  const response = await fetch(`https://${endpoint.apiHost}${path}`, {
+    ...options,
+    signal: options.signal || AbortSignal.timeout(15000),
+    headers: { "Accept": "application/json", ...(options.headers || {}) },
+  });
+  let data = null;
+  try {
+    data = await response.json();
+  } catch {
+    // Non-JSON responses are represented by the HTTP status below.
+  }
+  return { response, data };
+}
+
+async function loginToCloud(region, input) {
+  const directToken = String(input.accessToken || "").trim();
+  if (directToken) return { accessToken: directToken, tokenExpiresAt: null };
+
+  const account = String(input.account || "").trim();
+  const password = String(input.password || "");
+  const verificationCode = String(input.verificationCode || "").trim();
+  if (!account || (!password && !verificationCode)) throw new Error("请填写拓竹账号与密码，或使用已有 Access Token");
+
+  const loginBody = verificationCode ? { account, code: verificationCode } : { account, password };
+  const { response, data } = await cloudRequest(region, "/v1/user-service/user/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(loginBody),
+  });
+  const accessToken = data && typeof data === "object" ? String(data.accessToken || "").trim() : "";
+  if (!accessToken && data?.loginType === "verifyCode") throw new VerificationRequiredError();
+  if (!response.ok || !accessToken) throw new Error(cloudError(response, data, "无法登录拓竹云端"));
+  const expiresIn = Number(data.expiresIn);
+  const tokenExpiresAt = Number.isFinite(expiresIn) && expiresIn > 0 ? new Date(Date.now() + expiresIn * 1000).toISOString() : null;
+  return { accessToken, tokenExpiresAt };
+}
+
+async function resolveCloudIdentity(region, serial, accessToken) {
+  const headers = { "Authorization": `Bearer ${accessToken}` };
+  const [{ response: profileResponse, data: profile }, { response: devicesResponse, data: devicesData }] = await Promise.all([
+    cloudRequest(region, "/v1/design-user-service/my/preference", { headers }),
+    cloudRequest(region, "/v1/iot-service/api/user/bind", { headers }),
+  ]);
+  if (!profileResponse.ok) throw new Error(cloudError(profileResponse, profile, "无法读取拓竹账号信息"));
+  if (!devicesResponse.ok) throw new Error(cloudError(devicesResponse, devicesData, "无法读取账号中的打印机"));
+  const userId = String(profile?.uid ?? profile?.data?.uid ?? "").trim();
+  if (!/^\d+$/.test(userId)) throw new Error("拓竹云端未返回有效用户 ID");
+  const devices = Array.isArray(devicesData?.devices) ? devicesData.devices : Array.isArray(devicesData?.data?.devices) ? devicesData.data.devices : [];
+  if (devices.length > 0 && !devices.some((device) => String(device?.dev_id || "").trim().toUpperCase() === serial)) {
+    throw new Error("该序列号不在当前拓竹账号的已绑定设备中");
+  }
+  return { userId };
+}
+
+export async function buildConfiguration(input) {
+  const base = validateBaseConfiguration(input);
+  const reuseToken = Boolean(input?.reuseToken && configuration?.accessToken && configuration?.region === base.region);
+  const auth = reuseToken
+    ? { accessToken: configuration.accessToken, tokenExpiresAt: configuration.tokenExpiresAt || null }
+    : await loginToCloud(base.region, input);
+  const identity = await resolveCloudIdentity(base.region, base.serial, auth.accessToken);
+  return validateStoredConfiguration({ ...base, ...auth, ...identity });
+}
+
+async function saveConfiguration(next) {
+  await mkdir(dataDirectory, { recursive: true });
+  await writeFile(configPath, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  await chmod(configPath, 0o600);
+}
+
+async function forwardLatest() {
+  if (!latestPayload || !configuration || sending || Date.now() - lastSentAt < 4000) return;
+  sending = true;
+  const payload = latestPayload;
+  latestPayload = null;
+  try {
+    const response = await fetch(`${configuration.siteUrl}/api/printers/ingest`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${configuration.bridgeToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ printerId: configuration.printerId, adapter: configuration.adapter, payload }),
+    });
+    if (!response.ok) throw new Error(`PrintFlow 接口返回 ${response.status}`);
+    lastSentAt = Date.now();
+    lastForwardAt = new Date().toISOString();
+    lastError = "";
+  } catch (error) {
+    latestPayload = payload;
+    lastError = error instanceof Error ? error.message : "状态同步失败";
+  } finally {
+    sending = false;
+  }
+}
+
+function connectPrinter(next) {
+  if (client) client.end(true);
+  connected = false;
+  lastError = "";
+  const reportTopic = `device/${next.serial}/report`;
+  client = mqtt.connect({
+    protocol: "mqtts",
+    host: cloudRegions[next.region].mqttHost,
+    port: 8883,
+    username: `u_${next.userId}`,
+    password: next.accessToken,
+    rejectUnauthorized: true,
+    reconnectPeriod: 10000,
+    connectTimeout: 15000,
+    clientId: `printflow_cloud_${Math.random().toString(16).slice(2, 10)}`,
+  });
+  client.on("connect", () => {
+    connected = true;
+    lastError = "";
+    client.subscribe(reportTopic, { qos: 0 }, (error) => {
+      if (error) lastError = `云端 MQTT 订阅失败：${error.message}`;
+    });
+  });
+  client.on("message", (_topic, message) => {
+    try {
+      latestPayload = JSON.parse(message.toString("utf8"));
+      lastMessageAt = new Date().toISOString();
+      void forwardLatest();
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "无法解析云端 MQTT 数据";
+    }
+  });
+  client.on("close", () => { connected = false; });
+  client.on("offline", () => { connected = false; });
+  client.on("error", (error) => { lastError = `云端 MQTT：${error.message}`; });
+}
+
+async function loadSavedConfiguration() {
+  try {
+    configuration = validateStoredConfiguration(JSON.parse(await readFile(configPath, "utf8")));
+    connectPrinter(configuration);
+  } catch (error) {
+    configuration = null;
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return;
+    lastError = "检测到旧配置或令牌无效，请在打印机设置中重新登录";
+  }
+}
+
+const server = createServer(async (request, response) => {
+  const origin = request.headers.origin || "";
+  if (request.method === "OPTIONS") {
+    if (!allowedOrigins.has(origin)) return sendJson(response, 403, { error: "不允许的页面来源" }, origin);
+    return sendJson(response, 204, {}, origin);
+  }
+  if (!allowedOrigins.has(origin)) return sendJson(response, 403, { error: "请从本机 PrintFlow 页面访问 Adapter" }, origin);
+  const url = new URL(request.url || "/", `http://127.0.0.1:${controlPort}`);
+  if (request.method === "GET" && url.pathname === "/status") return sendJson(response, 200, publicStatus(), origin);
+  if (request.method === "POST" && url.pathname === "/configure") {
+    try {
+      const next = await buildConfiguration(await readJson(request));
+      await saveConfiguration(next);
+      configuration = next;
+      connectPrinter(next);
+      return sendJson(response, 200, { ok: true, status: publicStatus() }, origin);
+    } catch (error) {
+      if (error instanceof VerificationRequiredError) {
+        return sendJson(response, 428, { error: error.message, verificationRequired: true }, origin);
+      }
+      return sendJson(response, 400, { error: error instanceof Error ? error.message : "保存云端 MQTT 配置失败" }, origin);
+    }
+  }
+  return sendJson(response, 404, { error: "接口不存在" }, origin);
+});
+
+export async function startAdapterService() {
+  await mkdir(dataDirectory, { recursive: true });
+  await loadSavedConfiguration();
+  await new Promise((resolveStart, rejectStart) => {
+    const onError = (error) => rejectStart(error);
+    server.once("error", onError);
+    server.listen(controlPort, "127.0.0.1", () => {
+      server.off("error", onError);
+      resolveStart();
+    });
+  });
+  forwardTimer = setInterval(() => void forwardLatest(), 4000);
+  console.log(`[PrintFlow] 云端 MQTT Adapter：http://127.0.0.1:${controlPort}`);
+}
+
+export async function stopAdapterService() {
+  if (forwardTimer) {
+    clearInterval(forwardTimer);
+    forwardTimer = null;
+  }
+  if (client) {
+    client.end(true);
+    client = null;
+  }
+  connected = false;
+  if (!server.listening) return;
+  await new Promise((resolveStop) => server.close(resolveStop));
+}
+
+const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedDirectly) {
+  await startAdapterService().catch((error) => {
+    console.error(`[PrintFlow] 云端 MQTT Adapter 无法启动：${error.message}`);
+    process.exit(1);
+  });
+
+  let stopping = false;
+  const shutdown = async () => {
+    if (stopping) return;
+    stopping = true;
+    await stopAdapterService();
+    process.exit(0);
+  };
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
+}

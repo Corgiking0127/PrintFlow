@@ -1,182 +1,177 @@
-# PrintFlow 部署指南
+# PrintFlow 本地部署指南
 
-本文档覆盖 PrintFlow 云端站点和 X2D MQTT 局域网桥接器的生产部署。当前可直接发布的云端目标是 OpenAI Sites；站点运行时依赖 Cloudflare Workers 和 D1。
+PrintFlow 的推荐生产方式是把网页、API、D1 数据库和 X2D 云端 MQTT Adapter 部署到同一台设备。打印机保持拓竹云端模式，因此 Bambu Handy 可以继续使用。
 
-## 1. 发布前检查
-
-环境要求：
+## 1. 环境与网络
 
 - Node.js `>= 22.13.0`
 - npm
-- 已配置的 OpenAI Sites 项目
-- `.openai/hosting.json` 中声明 D1 绑定 `DB`
+- macOS、Linux、NAS 或长期运行的 PC
+- 国际区账号可访问 `api.bambulab.com:443` 和 `us.mqtt.bambulab.com:8883`
+- 中国区账号可访问 `api.bambulab.cn:443` 和 `cn.mqtt.bambulab.com:8883`
+- 主机可以通过 HTTPS `443` 访问 MakerWorld 与 Bark
+- 不需要开放任何公网入站端口
 
-安装依赖并完成检查：
+PrintFlow 主机不需要与打印机位于同一局域网，也不需要固定打印机 IP。
+
+## 2. 首次安装
 
 ```bash
+git clone <repository-url> /opt/printflow
+cd /opt/printflow
 npm ci
 npm run lint
 npm test
+npm run local
 ```
 
-`npm test` 会执行完整部署构建和自动化测试。发布前还应确认：
+打开 `http://localhost:8082`。第一次启动时项目和打印机列表为空。
 
-- Git 工作区没有未提交的目标变更。
-- 仓库中不存在 `.env`、LAN Access Code、Bark Key 或桥接明文凭证。
-- `app/page.tsx` 不包含演示项目或伪造设备状态。
-- 如果修改过 `db/schema.ts`，已经运行 `npm run db:generate` 并检查新增迁移。
+### 连接拓竹云端 MQTT
 
-## 2. Sites 生产发布
+1. 确保 X2D 已在 Bambu Handy 中绑定，并保持 LAN Only 关闭。
+2. 在 PrintFlow“打印机”页面选择国际区或中国区。
+3. 填写拓竹账号邮箱、密码和打印机序列号。
+4. 如果出现邮箱验证码提示，查收验证码并再次保存。
+5. 页面显示“云端已连接”后，实时状态会自动同步。
 
-项目通过 `.openai/hosting.json` 绑定到既有 Sites 项目：
+密码和验证码仅用于当次登录，不会写入配置文件。Adapter 会保存 Access Token 供重启后继续连接；Token 失效后重新登录即可。云端 MQTT 是社区兼容协议，参考：<https://github.com/Doridian/OpenBambuAPI/blob/main/mqtt.md>
 
-```json
-{
-  "project_id": "appgprj_6a918e14326c8191966cd99e24356210",
-  "d1": "DB",
-  "r2": null
-}
-```
+## 3. 本地端口与持久化
 
-推荐在 Codex 中从项目根目录发起发布：
+| 项目 | 默认值 | 说明 |
+| --- | --- | --- |
+| 网页/API | `127.0.0.1:8082` | 仅本机访问，浏览器使用 `http://localhost:8082` |
+| Adapter 控制接口 | `127.0.0.1:8790` | 仅本机网页可配置 |
+| 拓竹云端 MQTT | `us.mqtt.bambulab.com:8883` 或 `cn.mqtt.bambulab.com:8883` | Adapter 主动连接云端 |
+| 本地数据 | `.data/` | D1、Wrangler 状态与 Adapter 配置 |
 
-> 使用 Sites 构建、保存新版本，并以私有访问方式部署当前 PrintFlow 项目。
-
-标准发布流程会完成以下工作：
-
-1. 构建 Cloudflare Worker 兼容产物。
-2. 提交并推送与构建产物完全一致的源码版本。
-3. 将 `dist/`、托管声明和 `drizzle/` 迁移打包为 Sites 版本。
-4. 保存不可变版本。
-5. 以 owner-only 私有访问策略发布。
-6. 等待部署成功并返回生产 URL。
-
-不要把 `dist/client` 当作纯静态站点单独上传；项目的 API、D1 和服务端渲染需要 Worker 运行时。
-
-### 数据库迁移
-
-数据库结构定义位于 `db/schema.ts`，迁移文件位于 `drizzle/`。修改结构后执行：
+可通过环境变量修改网页和 Adapter 端口：
 
 ```bash
-npm run db:generate
+PRINTFLOW_WEB_PORT=8082 PRINTFLOW_ADAPTER_PORT=8790 npm run local:start
 ```
 
-检查迁移中没有删除或覆盖用户数据的语句，再随站点版本一起发布。API 路由还会以 `CREATE TABLE IF NOT EXISTS` 方式保证基础表存在，但这不能代替正式迁移审查。
+如果修改网页端口，还需要确保 `PRINTFLOW_LOCAL_ORIGINS` 包含实际本地 Origin。
 
-### 发布后验收
+## 4. 使用 systemd 常驻运行
 
-1. 打开生产 URL，完成 ChatGPT 私有站点登录。
-2. 确认项目库为空时只显示空状态，不出现演示项目。
-3. 导入一个真实 MakerWorld 链接，核对名称、盘数和每盘时间。
-4. 切换整项目/逐盘排产，确认队列随之变化。
-5. 配置 Bark Key 并发送测试通知。
-6. 配置 X2D，启动桥接器，确认页面在 90 秒内显示在线状态。
-7. 核对打印进度、层数、双喷嘴温度和 AMS 槽位数据。
-
-## 3. MQTT 桥接器生产部署
-
-桥接器必须运行在与 X2D 相同的局域网中。云端服务器无论部署在 Sites 还是阿里云，都不应直接暴露或穿透打印机 MQTT 端口。
-
-### 网络要求
-
-- 桥接主机可以访问打印机的 TCP `8883`。
-- 桥接主机可以通过 HTTPS `443` 访问 PrintFlow 生产 URL。
-- 不需要开放任何公网入站端口。
-- 建议为打印机设置 DHCP 地址保留，避免局域网 IP 变化。
-
-### 安装
-
-在 PrintFlow“打印机”页面保存设备后，下载：
-
-- `printflow-x2d.env`
-- `printflow-x2d-bridge.mjs`
-
-将文件保存到专用目录，例如 `/opt/printflow-bridge`，然后运行：
+先完成构建：
 
 ```bash
-cd /opt/printflow-bridge
-npm install mqtt
-chmod 600 printflow-x2d.env
-node --env-file=printflow-x2d.env printflow-x2d-bridge.mjs
+cd /opt/printflow
+npm ci
+npm run build
 ```
 
-### 使用 systemd 常驻运行
+创建专用账户并确保其拥有项目及 `.data` 目录：
 
-创建 `/etc/systemd/system/printflow-x2d-bridge.service`：
+```bash
+sudo useradd --system --home /opt/printflow --shell /usr/sbin/nologin printflow
+sudo mkdir -p /opt/printflow/.data
+sudo chown -R printflow:printflow /opt/printflow
+```
+
+创建 `/etc/systemd/system/printflow.service`：
 
 ```ini
 [Unit]
-Description=PrintFlow X2D MQTT Bridge
+Description=PrintFlow Local Web and X2D MQTT Adapter
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/printflow-bridge
-ExecStart=/usr/bin/node --env-file=/opt/printflow-bridge/printflow-x2d.env /opt/printflow-bridge/printflow-x2d-bridge.mjs
+WorkingDirectory=/opt/printflow
+ExecStart=/usr/bin/npm run local:start
 Restart=always
 RestartSec=5
 User=printflow
 Group=printflow
+Environment=PRINTFLOW_WEB_PORT=8082
+Environment=PRINTFLOW_ADAPTER_PORT=8790
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-启用服务：
+启用：
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now printflow-x2d-bridge
-sudo systemctl status printflow-x2d-bridge
+sudo systemctl enable --now printflow
+sudo systemctl status printflow
 ```
 
 查看日志：
 
 ```bash
-journalctl -u printflow-x2d-bridge -f
+journalctl -u printflow -f
 ```
 
-当局域网地址、LAN Access Code 或桥接凭证变化时，在 PrintFlow 中重新保存设备并下载新的 `.env`，替换旧文件后重启服务。
+## 5. 更新
 
-## 4. 备份与回滚
+```bash
+cd /opt/printflow
+sudo systemctl stop printflow
+git pull --ff-only
+npm ci
+npm run lint
+npm test
+sudo systemctl start printflow
+```
 
-- 云端代码通过 Sites 的不可变版本回滚到上一成功版本。
-- 数据库迁移应采用向前修复，不要在回滚代码时自动删除新表或新列。
-- 发布重要结构变化前，通过平台提供的 D1 导出或快照能力备份生产数据。
-- 桥接器更新前保留上一份脚本；`.env` 包含机密信息，不要提交到 Git 或放入普通备份共享目录。
+数据库迁移位于 `drizzle/`。修改 `db/schema.ts` 后必须运行 `npm run db:generate` 并检查迁移内容。
 
-## 5. 阿里云部署边界
+## 6. 备份与恢复
 
-当前仓库不是可直接运行在阿里云 ECS 普通 Node.js 进程中的版本，原因是 API 和数据库层使用 `cloudflare:workers`、Cloudflare D1 与 Sites 构建插件。直接运行 `dist/server/index.js` 或把静态文件上传 OSS，会导致 API、数据库和 MQTT 状态写入不可用。
+停止服务后备份整个 `.data/`：
 
-若必须迁移到阿里云，需要先完成平台适配：
+```bash
+sudo systemctl stop printflow
+tar -czf printflow-data-backup.tar.gz -C /opt/printflow .data
+sudo systemctl start printflow
+```
 
-1. 将 D1/Drizzle D1 驱动替换为阿里云 RDS PostgreSQL 或 MySQL 驱动。
-2. 将 `cloudflare:workers` 环境绑定改为普通服务器环境变量。
-3. 将 vinext Cloudflare Worker 构建切换为受支持的 Node.js 服务端构建。
-4. 把现有 D1 迁移转换为目标数据库迁移并执行数据迁移。
-5. 在 SLB、ALB 或 Nginx 配置 HTTPS、访问控制和健康检查。
-6. 保留局域网桥接器；不要让阿里云主机直接连接家庭或工作室内的 MQTT 服务。
+`.data/printer-config.json` 包含拓竹 Access Token 和 PrintFlow 内部凭证，备份必须加密并限制访问。它不包含拓竹账号密码。恢复时将 `.data/` 放回项目根目录，确认所有者为 `printflow:printflow` 后启动服务。
 
-在上述适配完成前，生产站点应继续部署到 Sites。阿里云可以承载未来的 Node.js/API 与 RDS 版本，但不应把当前 Worker 产物当作可直接部署包。
+## 7. Sites 页面限制
 
-## 6. 故障排查
+仓库仍保留 OpenAI Sites + D1 的兼容部署，但出于账号安全考虑，Sites 页面不会接收拓竹账号密码或 Access Token。打印机云端 MQTT 配置必须从 `http://localhost:8082` 完成。
 
-### 页面显示“桥接离线”
+云端发布时：
 
-- 检查桥接服务是否运行。
-- 检查打印机 IP、序列号和 LAN Access Code。
-- 确认桥接主机可以访问打印机 `8883` 和站点 `443`。
-- 如果重新保存过设备配置，必须替换 `.env` 中的一次性桥接凭证。
+1. 运行 `npm run lint` 与 `npm test`。
+2. 使用 `.openai/hosting.json` 中的既有 Sites 项目。
+3. 保存并部署私有 Sites 版本。
+4. 在受信任的本机运行云端 MQTT Adapter。
 
-### 站点返回 401
+本地一体模式不需要 ChatGPT 登录，也不会把拓竹 Token 上传到 Sites。
 
-- 访问网页时重新完成 ChatGPT 私有站点登录。
-- 桥接器返回 401 时，在打印机设置页轮换凭证并重新下载 `.env`。
+## 8. 阿里云边界
+
+云端 MQTT 不要求服务器访问家庭或工作室局域网，因此 Adapter 可以运行在本机、NAS 或阿里云 ECS。若运行在远程服务器，必须使用专用账户、限制配置文件权限并加密备份，因为服务器会持有拓竹 Access Token。
+
+当前 API 数据层使用 Cloudflare D1。若要把完整网页/API 迁移到阿里云 ECS 的普通 Node.js 服务，需要先把 D1 驱动替换为 RDS PostgreSQL/MySQL，并调整 Worker 构建；当前本地一体模式不需要这项迁移。
+
+## 9. 故障排查
+
+### 页面没有显示“本地一体模式”
+
+- 必须使用 `npm run local` 或 `npm run local:start`，而不是只运行 `npm run dev`。
+- 使用 `http://localhost:8082` 打开网页，不要使用云端 URL。
+- 检查 `127.0.0.1:8790` 是否被其他程序占用。
+
+### Adapter 一直显示“正在连接”
+
+- 确认账号区域正确：中国区与国际区不能混用。
+- 确认序列号属于当前拓竹账号的已绑定设备。
+- 确认 LAN Only 已关闭，打印机在 Bambu Handy 中显示在线。
+- 检查主机能否访问对应 API 的 `443` 和 MQTT 的 `8883`。
+- 若提示认证失败或 Token 过期，在设置页重新输入账号密码登录。
 
 ### 数据库接口失败
 
-- 确认 `.openai/hosting.json` 的 D1 逻辑绑定仍为 `DB`。
-- 确认最新版本包含全部 `drizzle/` 迁移。
-- 不要在本地使用不带 Cloudflare 绑定的普通 Node 生产启动方式验证数据库 API；使用 `npm run dev` 或已部署的 Sites 环境。
+- 确认使用 `wrangler.local.jsonc` 启动本地 Worker。
+- 确认服务账户可以读写 `.data/`。
+- 确认构建产物包含 `dist/server/index.js` 和 `dist/client/`。

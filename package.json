@@ -11,6 +11,8 @@
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run build && tsx --test tests/*.test.ts",
     "bridge:x2d": "node --env-file=.env public/printflow-x2d-bridge.mjs",
+    "local": "npm run build && npm run local:start",
+    "local:start": "node local/start.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },

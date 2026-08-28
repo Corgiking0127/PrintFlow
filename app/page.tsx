@@ -19,6 +19,19 @@ const defaultSettings: ScheduleSettings = {
 
 type View = "schedule" | "projects" | "printers" | "rules" | "notifications";
 type Draft = Omit<Project, "id" | "status">;
+type CloudRegion = "global" | "china";
+type LocalAdapterStatus = {
+  mode: "cloud-mqtt";
+  configured: boolean;
+  connected: boolean;
+  lastMessageAt: string | null;
+  lastForwardAt: string | null;
+  lastError: string;
+  tokenExpiresAt: string | null;
+  printer: { name: string; serial: string; adapter: string; region: CloudRegion; regionLabel: string; broker: string } | null;
+};
+
+const LOCAL_ADAPTER_URL = "http://127.0.0.1:8790";
 
 const emptyDraft: Draft = { name: "", sourceUrl: "", plates: 1, durationMinutes: 60, plateDurations: [], plateNames: [], splitByPlate: false, urgent: false, deadline: null, material: "PLA", color: "自然色" };
 
@@ -87,7 +100,7 @@ export default function Home() {
   const deviceCards = [
     {
       name: primaryPrinter?.name || "X2D 工作站",
-      state: primaryPrinter ? (printerOnline ? telemetry?.stateLabel || "已连接" : "桥接离线") : "待配置",
+      state: primaryPrinter ? (printerOnline ? telemetry?.stateLabel || "已连接" : "云端离线") : "待配置",
       task: telemetry?.taskName || (primaryPrinter ? "等待 MQTT 数据" : "前往打印机设置完成接入"),
       progress: telemetry?.progress || 0,
       eta: remainingLabel(telemetry?.remainingMinutes),
@@ -97,7 +110,7 @@ export default function Home() {
     },
     {
       name: "AMS 2 Pro",
-      state: printerOnline ? (primaryAms?.drying ? "干燥中" : "已连接") : "等待桥接",
+      state: printerOnline ? (primaryAms?.drying ? "干燥中" : "已连接") : "等待云端",
       task: primaryAms ? `${primaryAms.trays.length} 个槽位 · 湿度等级 ${primaryAms.humidityLevel ?? "—"}` : "耗材、湿度与干燥状态",
       progress: primaryAms?.trays.length ? Math.round(primaryAms.trays.reduce((sum, tray) => sum + (tray.remainingPercent || 0), 0) / primaryAms.trays.length) : 0,
       eta: primaryAms ? `舱温 ${temperatureLabel(primaryAms.temperatureC)}` : "连接后自动读取",
@@ -106,12 +119,12 @@ export default function Home() {
       idle: !printerOnline,
     },
     {
-      name: "MQTT 局域网桥接",
+      name: "拓竹云端 MQTT",
       state: printerOnline ? "同步中" : primaryPrinter ? "未收到数据" : "未配置",
-      task: primaryPrinter ? `${primaryPrinter.localIp}:8883 · ${primaryPrinter.serial}` : "本地读取，安全转发",
+      task: primaryPrinter ? `${primaryPrinter.localIp}:8883 · ${primaryPrinter.serial}` : "保留 Bambu Handy，实时读取状态",
       progress: printerOnline ? 100 : 0,
       eta: primaryPrinter?.lastSeen ? `最后同步 ${new Date(primaryPrinter.lastSeen).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}` : "等待首次同步",
-      meta: "只读 MQTT",
+      meta: "云端只读 MQTT",
       color: "#f2a65a",
       idle: !printerOnline,
     },
@@ -358,10 +371,15 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
   const loadedId = useRef("");
   const [name, setName] = useState("X2D 工作站");
   const [serial, setSerial] = useState("");
-  const [localIp, setLocalIp] = useState("");
-  const [accessCode, setAccessCode] = useState("");
-  const [bridgeToken, setBridgeToken] = useState("");
+  const [region, setRegion] = useState<CloudRegion>("global");
+  const [account, setAccount] = useState("");
+  const [password, setPassword] = useState("");
+  const [verificationCode, setVerificationCode] = useState("");
+  const [accessToken, setAccessToken] = useState("");
+  const [verificationRequired, setVerificationRequired] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [localMode, setLocalMode] = useState(false);
+  const [localAdapter, setLocalAdapter] = useState<LocalAdapterStatus | null>(null);
 
   useEffect(() => {
     if (!printer || printer.id === loadedId.current) return;
@@ -369,58 +387,83 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
       loadedId.current = printer.id;
       setName(printer.name);
       setSerial(printer.serial);
-      setLocalIp(printer.localIp);
+      setRegion(printer.localIp.startsWith("cn.") ? "china" : "global");
     }, 0);
     return () => window.clearTimeout(timer);
   }, [printer]);
 
+  useEffect(() => {
+    let active = true;
+    const modeTimer = window.setTimeout(() => {
+      if (active) setLocalMode(["localhost", "127.0.0.1"].includes(window.location.hostname));
+    }, 0);
+    const readLocalAdapter = () => fetch(`${LOCAL_ADAPTER_URL}/status`, { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : Promise.reject())
+      .then((status: LocalAdapterStatus) => { if (active && status.mode === "cloud-mqtt") setLocalAdapter(status); })
+      .catch(() => { if (active) setLocalAdapter(null); });
+    void readLocalAdapter();
+    const timer = window.setInterval(readLocalAdapter, 5000);
+    return () => { active = false; window.clearTimeout(modeTimer); window.clearInterval(timer); };
+  }, []);
+
   async function savePrinter(event: FormEvent) {
     event.preventDefault();
-    if (!serial.trim() || !localIp.trim()) return onToast("请填写序列号和局域网地址");
-    if (!accessCode.trim()) return onToast("请输入打印机 LAN Access Code；它只在本浏览器中使用");
+    if (!localMode) return onToast("云端 MQTT Adapter 仅可从本机 PrintFlow 页面配置");
+    if (!localAdapter) return onToast("本地 Adapter 暂时不可用，请使用 npm run local 启动完整服务");
+    if (!serial.trim()) return onToast("请填写打印机序列号");
+    const canReuseToken = localAdapter.configured && localAdapter.printer?.region === region;
+    if (!canReuseToken && !accessToken.trim() && (!account.trim() || (!password && !verificationCode.trim()))) {
+      return onToast("请填写拓竹账号与密码，或使用已有 Access Token");
+    }
     setSaving(true);
     try {
+      const connectionHost = region === "china" ? "cn.mqtt.bambulab.com" : "us.mqtt.bambulab.com";
       const response = await fetch("/api/printers", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "save", id: printer?.id, name, serial, localIp, adapter: X2D_AMS2_ADAPTER_ID, rotateToken: true }),
+        body: JSON.stringify({ action: "save", id: printer?.id, name, serial, connectionHost, adapter: X2D_AMS2_ADAPTER_ID, rotateToken: true }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "保存失败");
-      setBridgeToken(data.bridgeToken || "");
+      const localResponse = await fetch(`${LOCAL_ADAPTER_URL}/configure`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          serial,
+          region,
+          account,
+          password,
+          verificationCode,
+          accessToken,
+          reuseToken: canReuseToken && !account && !password && !verificationCode && !accessToken,
+          siteUrl: window.location.origin,
+          printerId: data.printer.id,
+          bridgeToken: data.bridgeToken,
+          adapter: X2D_AMS2_ADAPTER_ID,
+        }),
+      });
+      const localData = await localResponse.json();
+      if (!localResponse.ok) {
+        if (localData.verificationRequired) {
+          setVerificationRequired(true);
+          setPassword("");
+        }
+        throw new Error(localData.error || "云端 MQTT Adapter 配置失败");
+      }
+      setLocalAdapter(localData.status);
+      setVerificationRequired(false);
+      setPassword("");
+      setVerificationCode("");
+      setAccessToken("");
       loadedId.current = data.printer.id;
       onRefresh([data.printer, ...printers.filter((item) => item.id !== data.printer.id)]);
-      onToast("打印机已保存，桥接配置已生成");
+      onToast("已保存，云端 MQTT 正在连接 X2D；Bambu Handy 可继续使用");
     } catch (error) {
       onToast(error instanceof Error ? error.message : "保存失败");
     } finally {
       setSaving(false);
     }
-  }
-
-  function downloadBridgeConfig() {
-    if (!bridgeToken || !accessCode.trim()) return onToast("请先保存打印机并生成一次性桥接凭证");
-    const clean = (value: string) => value.replace(/[\r\n"]/g, "");
-    const contents = [
-      `PRINTER_NAME="${clean(name)}"`,
-      `PRINTER_MODEL="Bambu Lab X2D + AMS 2 Pro"`,
-      `PRINTER_HOST="${clean(localIp)}"`,
-      `PRINTER_MQTT_PORT="8883"`,
-      `PRINTER_SERIAL="${clean(serial.toUpperCase())}"`,
-      `PRINTER_ACCESS_CODE="${clean(accessCode)}"`,
-      `PRINTER_ADAPTER="${X2D_AMS2_ADAPTER_ID}"`,
-      `PRINTFLOW_SITE_URL="${window.location.origin}"`,
-      `PRINTFLOW_PRINTER_ID="${printer?.id || loadedId.current}"`,
-      `PRINTFLOW_BRIDGE_TOKEN="${bridgeToken}"`,
-      "",
-    ].join("\n");
-    const url = URL.createObjectURL(new Blob([contents], { type: "text/plain;charset=utf-8" }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "printflow-x2d.env";
-    link.click();
-    URL.revokeObjectURL(url);
-    onToast("桥接配置已下载，请妥善保存");
   }
 
   const nozzleSummary = telemetry?.nozzles || [];
@@ -429,8 +472,8 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
   return <>
     <section className={`notice-card printer-connection-notice ${online ? "online" : "neutral"}`}>
       <div className="notice-icon">{online ? "↯" : "▣"}</div>
-      <div><strong>{online ? "X2D MQTT 状态正在实时同步" : printer ? "设备已配置，等待局域网桥接器上线" : "配置 X2D + AMS 2 Pro 的 MQTT 读取"}</strong><p>云端页面不直接访问家庭局域网；本地桥接器只读订阅打印机状态，再通过加密连接同步到 PrintFlow。</p></div>
-      <span className={`live-badge ${online ? "connected" : ""}`}>{online ? "实时在线" : "离线"}</span>
+      <div><strong>{online ? "X2D 云端 MQTT 状态正在实时同步" : localMode ? localAdapter?.configured ? "云端 Adapter 已配置，正在等待打印机数据" : localAdapter ? "网页与云端 MQTT Adapter 已一体运行" : "本地 Adapter 暂时不可用" : "请使用本地 PrintFlow 配置云端 MQTT"}</strong><p>{localMode ? "打印机保持云端模式，Bambu Handy 可继续使用；无需开启 LAN Only 或 Developer Mode。" : "拓竹账号凭证只允许交给本机 Adapter，当前云端页面不会接收或保存这些信息。"}</p></div>
+      <span className={`live-badge ${online || (localMode && localAdapter?.connected) ? "connected" : ""}`}>{online ? "实时在线" : localAdapter?.connected ? "云端已连接" : localMode ? "等待云端" : "仅限本地配置"}</span>
     </section>
 
     <div className="printer-settings-layout">
@@ -456,32 +499,39 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
             <div className="tray-grid">{unit.trays.map((tray) => <div className={`tray-card ${tray.active ? "active" : ""}`} key={tray.id}><i style={{ background: tray.color }} /><span>{tray.name}</span><strong>{tray.material}</strong><small>{tray.remainingPercent === null ? "余量未知" : `剩余 ${tray.remainingPercent}%`}</small>{tray.active && <b>正在使用</b>}</div>)}</div>
           </article>)}</div>
           {telemetry.errors.length > 0 && <div className="printer-errors"><strong>设备告警</strong>{telemetry.errors.map((error) => <span key={error}>{error}</span>)}</div>}
-        </> : <div className="printer-empty"><span>↯</span><strong>等待第一条 MQTT 状态</strong><p>保存设置并运行本地桥接器后，打印进度、双喷嘴温度和 AMS 2 Pro 数据会自动出现。</p></div>}
+        </> : <div className="printer-empty"><span>↯</span><strong>等待第一条云端 MQTT 状态</strong><p>{localMode ? "登录拓竹账号后，Adapter 会从云端订阅 X2D 状态；打印进度、双喷嘴温度和 AMS 2 Pro 数据会在这里出现。" : "请从本机 PrintFlow 页面完成云端 MQTT 配置。"}</p></div>}
       </section>
 
       <aside className="content-card printer-config-card">
-        <div className="content-head"><div><h2>打印机设置</h2><p>当前仅开放一个适配器，后续型号可独立扩展。</p></div><span className="adapter-version">ADAPTER V1</span></div>
+        <div className="content-head"><div><h2>打印机设置</h2><p>通过拓竹云端 MQTT 读取状态，同时保留 Bambu Handy。</p></div><span className="adapter-version">CLOUD MQTT</span></div>
         <form onSubmit={savePrinter} className="printer-form">
           <label><span>设备名称</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：X2D 工作站" /></label>
           <label><span>打印机型号</span><input value="Bambu Lab X2D + AMS 2 Pro" readOnly /></label>
           <label><span>设备序列号</span><input value={serial} onChange={(event) => setSerial(event.target.value.toUpperCase())} placeholder="打印机设置页中的序列号" autoCapitalize="characters" /></label>
-          <label><span>局域网地址</span><input value={localIp} onChange={(event) => setLocalIp(event.target.value)} placeholder="例如：192.168.1.86" inputMode="decimal" /></label>
-          <label><span>LAN Access Code</span><input type="password" value={accessCode} onChange={(event) => setAccessCode(event.target.value)} placeholder="仅用于生成本地配置" autoComplete="off" /><small>不会发送到云端，也不会写入 PrintFlow 数据库。</small></label>
-          <label><span>数据适配器</span><select value={X2D_AMS2_ADAPTER_ID} disabled><option value={X2D_AMS2_ADAPTER_ID}>X2D + AMS 2 Pro · MQTT</option></select></label>
-          <button className="primary-button config-save" disabled={saving}>{saving ? "正在生成安全凭证…" : printer ? "保存并更新桥接凭证" : "保存并生成桥接配置"}</button>
+          <label><span>拓竹账号区域</span><select value={region} onChange={(event) => setRegion(event.target.value as CloudRegion)}><option value="global">国际区 · bambulab.com</option><option value="china">中国区 · bambulab.cn</option></select></label>
+          <label><span>拓竹账号邮箱</span><input type="email" value={account} onChange={(event) => setAccount(event.target.value)} placeholder={localAdapter?.configured ? "令牌未过期时可留空" : "name@example.com"} autoComplete="username" /><small>仅在登录时由本机 Adapter 发送给拓竹云端，不会写入 PrintFlow 数据库。</small></label>
+          <label><span>拓竹账号密码</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder={localAdapter?.configured ? "重新登录时填写" : "仅用于本次登录"} autoComplete="current-password" /><small>密码不会保存到磁盘；登录成功后只保存云端 Access Token。</small></label>
+          {verificationRequired && <label className="verification-field"><span>邮箱验证码</span><input value={verificationCode} onChange={(event) => setVerificationCode(event.target.value.replace(/\s/g, ""))} placeholder="输入拓竹发送的验证码" inputMode="numeric" autoComplete="one-time-code" /><small>验证码验证成功后会自动连接云端 MQTT。</small></label>}
+          <details className="cloud-auth-help">
+            <summary>高级：使用已有 Access Token</summary>
+            <label><span>Access Token</span><input type="password" value={accessToken} onChange={(event) => setAccessToken(event.target.value.trim())} placeholder="已有令牌时可跳过账号密码" autoComplete="off" /></label>
+            <p>令牌只保存在本机 `.data/printer-config.json`。这是社区兼容协议，并非拓竹公开、稳定承诺的 API，云端升级后可能需要重新登录或适配。</p>
+            <a href="https://github.com/Doridian/OpenBambuAPI/blob/main/mqtt.md" target="_blank" rel="noreferrer">查看社区协议说明 ↗</a>
+          </details>
+          <label><span>数据适配器</span><select value={X2D_AMS2_ADAPTER_ID} disabled><option value={X2D_AMS2_ADAPTER_ID}>X2D + AMS 2 Pro · 云端 MQTT</option></select></label>
+          <button className="primary-button config-save" disabled={saving || !localMode || !localAdapter}>{saving ? "正在登录并配置…" : localAdapter?.configured ? "保存并重连云端 MQTT" : "登录并连接云端 MQTT"}</button>
         </form>
 
-        <div className={`bridge-download ${bridgeToken ? "ready" : ""}`}>
-          <div><span>局域网桥接器</span><strong>{bridgeToken ? "配置已就绪" : "保存后可下载"}</strong></div>
-          <p>凭证只显示这一次。若遗失，可重新保存并生成新凭证。</p>
-          <div className="download-actions"><button onClick={downloadBridgeConfig} disabled={!bridgeToken}>下载 .env 配置</button><a href="/printflow-x2d-bridge.mjs" download>下载桥接器</a></div>
-        </div>
-
-        <ol className="bridge-steps">
-          <li><b>1</b><span><strong>下载两个文件</strong><small>将 .env 与桥接器放在同一文件夹。</small></span></li>
-          <li><b>2</b><span><strong>安装 MQTT 组件</strong><small>在该文件夹运行 npm install mqtt。</small></span></li>
-          <li><b>3</b><span><strong>保持本地运行</strong><small>运行 node --env-file=printflow-x2d.env printflow-x2d-bridge.mjs。</small></span></li>
-        </ol>
+        {localMode ? <>
+          <div className={`bridge-download ${localAdapter?.connected ? "ready" : ""} local-adapter-card`}>
+            <div><span>云端 MQTT Adapter</span><strong>{localAdapter?.connected ? "MQTT 已连接" : localAdapter?.configured ? "正在连接" : localAdapter ? "等待登录" : "服务不可用"}</strong></div>
+            <p>{localAdapter?.printer ? `${localAdapter.printer.regionLabel} · ${localAdapter.printer.broker}:8883` : "网页和 Adapter 由同一个本地启动命令管理；打印机保持云端模式。"}</p>
+            <div className="local-adapter-meta"><span>状态上报</span><b>{localAdapter?.lastForwardAt ? new Date(localAdapter.lastForwardAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "尚未收到"}</b></div>
+            {localAdapter?.tokenExpiresAt && <div className="local-adapter-meta"><span>令牌预计有效至</span><b>{new Date(localAdapter.tokenExpiresAt).toLocaleDateString("zh-CN")}</b></div>}
+            {localAdapter?.lastError && <div className="local-adapter-error">{localAdapter.lastError}</div>}
+          </div>
+          <ol className="bridge-steps"><li><b>1</b><span><strong>保持打印机云端模式</strong><small>不要开启 LAN Only，Bambu Handy 可继续使用。</small></span></li><li><b>2</b><span><strong>本机完成登录</strong><small>密码和验证码不落盘，只保存访问令牌。</small></span></li><li><b>3</b><span><strong>保持 PrintFlow 运行</strong><small>退出本地服务后，云端 MQTT 同步会同时停止。</small></span></li></ol>
+        </> : <div className="bridge-download"><div><span>本地安全限制</span><strong>当前无法配置</strong></div><p>请运行本地 PrintFlow 并打开 `http://localhost:8082`。当前页面不会接收拓竹账号、密码或 Access Token。</p></div>}
       </aside>
     </div>
 
