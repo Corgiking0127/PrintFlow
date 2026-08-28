@@ -86,3 +86,35 @@ test("plate seconds are rounded to the nearest minute instead of always rounded 
   const result = parseMakerWorldDesign(design, new URL("https://makerworld.com/en/models/123#profileId-111"));
   assert.equal(result?.project.durationMinutes, 60);
 });
+
+test("Spring Gun V5 shared link selects its 4.3 hour, 2-plate default profile", () => {
+  const springGun: MakerWorldDesign = {
+    title: "Spring Gun V5 - Shoots fake bullets with magazine",
+    defaultInstanceId: 1613981,
+    instances: [
+      {
+        id: 1613981,
+        profileId: 334226728,
+        title: "Spring Gun V5",
+        extention: {
+          modelInfo: {
+            compatibility: { devProductName: "P1S" },
+            plates: [{ index: 1, prediction: 8075 }, { index: 2, prediction: 7391 }],
+          },
+        },
+      },
+      { id: 1614029, profileId: 332853185, title: "3x Bullets Bicolor", extention: { modelInfo: { plates: [{ index: 1, prediction: 1483 }] } } },
+      { id: 1613990, profileId: 332843999, title: "Target with points", extention: { modelInfo: { plates: [{ index: 1, prediction: 4818 }, { index: 2, prediction: 3588 }] } } },
+      { id: 2613719, profileId: 646582634, title: "PETG · A1 Mini", extention: { modelInfo: { plates: [{ index: 1, prediction: 8089 }, { index: 2, prediction: 7129 }] } } },
+    ],
+  };
+  const result = parseMakerWorldDesign(
+    springGun,
+    new URL("https://makerworld.com/zh/models/1538231-spring-gun-v5-shoots-fake-bullets-with-magazine?from=search#profileId-1613981"),
+  );
+  assert.equal(springGun.instances?.length, 4);
+  assert.equal(result?.profile.instanceId, 1613981);
+  assert.equal(result?.project.plates, 2);
+  assert.deepEqual(result?.project.plateDurations, [135, 123]);
+  assert.equal(result?.project.durationMinutes, 258);
+});

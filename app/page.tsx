@@ -156,7 +156,8 @@ export default function Home() {
       flash("已读取网页，请核对打印配置");
     } catch (error) {
       flash(error instanceof Error ? error.message : "读取失败，可手动录入");
-      setImported(true);
+      setImported(false);
+      setImportProfile(null);
     } finally {
       setImporting(false);
     }

@@ -93,9 +93,12 @@ export async function POST(request: Request) {
     const plateMatches = [...profileBlock.matchAll(/(\d+)\s*(?:plates?|打印盘|盘)/gi)].map((match) => Number(match[1]));
     const hourMatches = [...profileBlock.matchAll(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h|小时)/gi)].map((match) => Number(match[1]));
     const minuteMatches = [...profileBlock.matchAll(/(\d+)\s*(?:minutes?|mins?|分钟)/gi)].map((match) => Number(match[1]));
-    const plates = precisePlates || Number(profilePair?.[2]) || plateMatches.find((value) => value > 0 && value < 100) || 1;
+    const plates = precisePlates || Number(profilePair?.[2]) || plateMatches.find((value) => value > 0 && value < 100) || 0;
     let durationMinutes = Math.round((preciseHours || Number(profilePair?.[1]) || hourMatches.find((value) => value > 0 && value < 500) || 0) * 60);
-    if (!durationMinutes) durationMinutes = minuteMatches.find((value) => value > 0 && value < 30000) || 60;
+    if (!durationMinutes) durationMinutes = minuteMatches.find((value) => value > 0 && value < 30000) || 0;
+    if (!plates || !durationMinutes) {
+      throw new Error("未能读取真实的打印盘数和打印时间；为避免错误排产，本次没有填入默认值");
+    }
 
     return Response.json({
       project: { name, sourceUrl: target.toString(), plates, durationMinutes, plateDurations: [], plateNames: [], splitByPlate: false, material: "PLA", color: "自然色" },
