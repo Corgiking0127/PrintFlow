@@ -14,6 +14,7 @@ const defaultSettings: ScheduleSettings = {
   overdueMinutes: 20,
   autoReschedule: true,
   failureBuffer: 8,
+  barkEndpoint: "https://api.day.app",
   barkKey: "",
 };
 
@@ -144,7 +145,7 @@ export default function Home() {
     const until = nextTask.start.getTime() - Date.now();
     if (until <= settings.reminderMinutes * 60000 && until > -settings.overdueMinutes * 60000) {
       reminded.current.add(nextTask.id);
-      fetch("/api/bark", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: settings.barkKey, title: "PrintFlow · 该换盘了", body: nextTask.planningUnit === "plate" ? `${nextTask.projectName} · 第 ${nextTask.plate}/${nextTask.plateCount} 盘` : `${nextTask.projectName} · 整项目（${nextTask.plateCount} 盘）` }) }).catch(() => undefined);
+      fetch("/api/bark", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint: settings.barkEndpoint, key: settings.barkKey, title: "PrintFlow · 该换盘了", body: nextTask.planningUnit === "plate" ? `${nextTask.projectName} · 第 ${nextTask.plate}/${nextTask.plateCount} 盘` : `${nextTask.projectName} · 整项目（${nextTask.plateCount} 盘）` }) }).catch(() => undefined);
     }
   }, [nextTask, settings]);
 
@@ -232,8 +233,9 @@ export default function Home() {
 
   async function testBark() {
     if (!settings.barkKey) return flash("请先填写 Bark Key");
-    const response = await fetch("/api/bark", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: settings.barkKey }) }).catch(() => null);
-    flash(response?.ok ? "测试通知已发送，请查看手机" : "发送失败，请检查 Bark Key");
+    const response = await fetch("/api/bark", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint: settings.barkEndpoint, key: settings.barkKey }) }).catch(() => null);
+    const data = await response?.json().catch(() => null);
+    flash(response?.ok ? "测试通知已发送，请查看手机" : data?.error || "发送失败，请检查 Bark 配置");
   }
 
   function markStarted() {
@@ -389,6 +391,7 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
   const [verificationRequired, setVerificationRequired] = useState(false);
   const [requestingCode, setRequestingCode] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [configOpen, setConfigOpen] = useState(false);
   const [localAdapter, setLocalAdapter] = useState<LocalAdapterStatus | null>(null);
 
   useEffect(() => {
@@ -412,6 +415,20 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
     const timer = window.setInterval(readLocalAdapter, 5000);
     return () => { active = false; window.clearInterval(timer); };
   }, []);
+
+  useEffect(() => {
+    if (!configOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !saving) setConfigOpen(false);
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [configOpen, saving]);
 
   async function requestCode() {
     if (!localAdapter) return onToast("MQTT Adapter 暂时不可用，请检查 PrintFlow 一体服务是否正常运行");
@@ -490,6 +507,7 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
       loadedId.current = data.printer.id;
       onRefresh([data.printer, ...printers.filter((item) => item.id !== data.printer.id)]);
       onToast("已保存，云端 MQTT 正在连接 X2D；Bambu Handy 可继续使用");
+      setConfigOpen(false);
     } catch (error) {
       onToast(error instanceof Error ? error.message : "保存失败");
     } finally {
@@ -509,9 +527,8 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
       <span className={`live-badge ${online || localAdapter?.connected ? "connected" : ""}`}>{online ? "实时在线" : localAdapter?.connected ? "云端已连接" : localAdapter ? "等待云端" : "Adapter 离线"}</span>
     </section>
 
-    <div className="printer-settings-layout">
-      <section className="content-card printer-live-panel">
-        <div className="content-head"><div><h2>{printer?.name || "X2D 实时状态"}</h2><p>{printer ? `${printer.model} · ${printer.serial}` : "完成右侧设置后，这里会显示打印机和 AMS 状态。"}</p></div><span className={`connection ${online ? "connected" : ""}`}>{online ? telemetry?.stateLabel || "已连接" : "未连接"}</span></div>
+    <section className="content-card printer-live-panel">
+        <div className="content-head"><div><h2>{printer?.name || "X2D 实时状态"}</h2><p>{printer ? `${printer.model} · ${printer.serial}` : "完成打印机配置后，这里会显示打印机和 AMS 状态。"}</p></div><div className="printer-panel-actions"><span className={`connection ${online ? "connected" : ""}`}>{online ? telemetry?.stateLabel || "已连接" : "未连接"}</span><button type="button" className="primary-button printer-config-trigger" onClick={() => setConfigOpen(true)}>{printer ? "修改配置" : "配置打印机"}</button></div></div>
 
         {telemetry ? <>
           <div className="printer-progress-hero">
@@ -533,10 +550,12 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
           </article>)}</div>
           {telemetry.errors.length > 0 && <div className="printer-errors"><strong>设备告警</strong>{telemetry.errors.map((error) => <span key={error}>{error}</span>)}</div>}
         </> : <div className="printer-empty"><span>↯</span><strong>等待第一条云端 MQTT 状态</strong><p>登录拓竹账号后，Adapter 会从云端订阅 X2D 状态；打印进度、双喷嘴温度和 AMS 2 Pro 数据会在这里出现。</p></div>}
-      </section>
+    </section>
 
-      <aside className="content-card printer-config-card">
-        <div className="content-head"><div><h2>打印机设置</h2><p>通过拓竹云端 MQTT 读取状态，同时保留 Bambu Handy。</p></div><span className="adapter-version">CLOUD MQTT</span></div>
+    {configOpen && <div className="modal-backdrop printer-config-backdrop">
+      <section className="modal printer-config-modal" role="dialog" aria-modal="true" aria-labelledby="printer-config-title">
+        <div className="modal-head printer-config-modal-head"><div><span>CLOUD MQTT</span><h2 id="printer-config-title">打印机设置</h2><p>通过拓竹云端 MQTT 读取状态，同时保留 Bambu Handy。</p></div><button type="button" aria-label="关闭打印机设置" onClick={() => setConfigOpen(false)} disabled={saving}>×</button></div>
+        <div className="printer-config-modal-body">
         <form onSubmit={savePrinter} className="printer-form">
           <label><span>设备名称</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：X2D 工作站" /></label>
           <label><span>打印机型号</span><input value="Bambu Lab X2D + AMS 2 Pro" readOnly /></label>
@@ -555,16 +574,19 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
           <button className="primary-button config-save" disabled={saving || !localAdapter}>{saving ? "正在登录并配置…" : localAdapter?.configured ? "保存并重连云端 MQTT" : "登录并连接云端 MQTT"}</button>
         </form>
 
-        <div className={`bridge-download ${localAdapter?.connected ? "ready" : ""} local-adapter-card`}>
+        <aside className="printer-config-help">
+          <div className={`bridge-download ${localAdapter?.connected ? "ready" : ""} local-adapter-card`}>
           <div><span>云端 MQTT Adapter</span><strong>{localAdapter?.connected ? "MQTT 已连接" : localAdapter?.configured ? "正在连接" : localAdapter ? "等待登录" : "服务不可用"}</strong></div>
           <p>{localAdapter?.printer ? `${localAdapter.printer.regionLabel} · ${localAdapter.printer.broker}:8883` : "Adapter 与 PrintFlow 在同一台服务器运行，无需浏览器连接额外地址。"}</p>
           <div className="local-adapter-meta"><span>状态上报</span><b>{localAdapter?.lastForwardAt ? new Date(localAdapter.lastForwardAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "尚未收到"}</b></div>
           {localAdapter?.tokenExpiresAt && <div className="local-adapter-meta"><span>令牌预计有效至</span><b>{new Date(localAdapter.tokenExpiresAt).toLocaleDateString("zh-CN")}</b></div>}
           {localAdapter?.lastError && <div className="local-adapter-error">{localAdapter.lastError}</div>}
+          </div>
+          <ol className="bridge-steps"><li><b>1</b><span><strong>保持打印机云端模式</strong><small>不要开启 LAN Only，Bambu Handy 可继续使用。</small></span></li><li><b>2</b><span><strong>完成账号登录</strong><small>密码和验证码不落盘，只保存访问令牌。</small></span></li><li><b>3</b><span><strong>保持 Adapter 运行</strong><small>Adapter 退出后，云端 MQTT 同步会停止。</small></span></li></ol>
+        </aside>
         </div>
-        <ol className="bridge-steps"><li><b>1</b><span><strong>保持打印机云端模式</strong><small>不要开启 LAN Only，Bambu Handy 可继续使用。</small></span></li><li><b>2</b><span><strong>完成账号登录</strong><small>密码和验证码不落盘，只保存访问令牌。</small></span></li><li><b>3</b><span><strong>保持 Adapter 运行</strong><small>Adapter 退出后，云端 MQTT 同步会停止。</small></span></li></ol>
-      </aside>
-    </div>
+      </section>
+    </div>}
   </>;
 }
 
@@ -576,5 +598,5 @@ function RulesView({ settings, onChange, onSave, scheduleCount, idleMinutes }: {
 function NotificationsView({ settings, onChange, onSave, onTest, nextTask, printerName }: { settings: ScheduleSettings; onChange: (value: ScheduleSettings) => void; onSave: () => void; onTest: () => void; nextTask?: ScheduledPlate; printerName: string }) {
   const taskLabel = nextTask ? nextTask.planningUnit === "plate" ? `${nextTask.projectName} · 第 ${nextTask.plate}/${nextTask.plateCount} 盘` : `${nextTask.projectName} · 整项目` : "暂无待执行任务";
   const detailLabel = nextTask ? `${printerName} · 预计打印 ${durationLabel(nextTask.durationMinutes)}` : `${printerName} · 导入项目后显示提醒内容`;
-  return <div className="settings-layout"><section className="content-card"><div className="content-head"><div><h2>Bark 通知</h2><p>在 iPhone 上安装 Bark，复制 Key 即可接收换盘提醒。</p></div><span className={`connection ${settings.barkKey ? "connected" : ""}`}>{settings.barkKey ? "已配置" : "未连接"}</span></div><label className="settings-field"><span>Bark Key</span><div className="input-action"><input type="password" placeholder="例如：AbCdEf123456" value={settings.barkKey} onChange={(event) => onChange({ ...settings, barkKey: event.target.value })} /><button onClick={onTest}>发送测试</button></div><small>Key 仅用于向 api.day.app 发送你的打印提醒。</small></label><div className="rule-divider" /><div className="rules-grid"><label><span>提前提醒</span><input type="number" min="1" max="120" value={settings.reminderMinutes} onChange={(event) => onChange({ ...settings, reminderMinutes: Number(event.target.value) })} /><small>分钟</small></label><label><span>逾期阈值</span><input type="number" min="5" max="180" value={settings.overdueMinutes} onChange={(event) => onChange({ ...settings, overdueMinutes: Number(event.target.value) })} /><small>超过后建议重排</small></label></div><div className="notification-samples"><div><span>即将换盘</span><p>下一盘开始前提醒，并显示项目、盘号和设备。</p><i>开启</i></div><div><span>任务逾期</span><p>未确认开始时提醒，页面打开时自动重排。</p><i>开启</i></div><div><span>DDL 风险</span><p>失败缓冲不足或预计延期时立即提醒。</p><i>开启</i></div></div><button className="primary-button save-rules" onClick={onSave}>保存通知设置</button></section><aside className="phone-preview"><div className="phone-notch" /><span>现在</span><div className="bark-preview"><b>PRINTFLOW</b><strong>该换盘了</strong><p>{taskLabel}<br />{detailLabel}</p></div><small>提前 {settings.reminderMinutes} 分钟提醒</small></aside></div>;
+  return <div className="settings-layout"><section className="content-card"><div className="content-head"><div><h2>Bark 通知</h2><p>在 iPhone 上安装 Bark，复制 Key 即可接收换盘提醒。</p></div><span className={`connection ${settings.barkKey ? "connected" : ""}`}>{settings.barkKey ? "已配置" : "未连接"}</span></div><label className="settings-field"><span>Bark 端点</span><input type="url" placeholder="https://api.day.app" value={settings.barkEndpoint} onChange={(event) => onChange({ ...settings, barkEndpoint: event.target.value })} /><small>默认使用官方服务，也可填写自托管 Bark 服务的基础地址。</small></label><label className="settings-field"><span>Bark Key</span><div className="input-action"><input type="password" placeholder="例如：AbCdEf123456" value={settings.barkKey} onChange={(event) => onChange({ ...settings, barkKey: event.target.value })} /><button onClick={onTest}>发送测试</button></div><small>Key 仅用于向上方端点发送你的打印提醒。</small></label><div className="rule-divider" /><div className="rules-grid"><label><span>提前提醒</span><input type="number" min="1" max="120" value={settings.reminderMinutes} onChange={(event) => onChange({ ...settings, reminderMinutes: Number(event.target.value) })} /><small>分钟</small></label><label><span>逾期阈值</span><input type="number" min="5" max="180" value={settings.overdueMinutes} onChange={(event) => onChange({ ...settings, overdueMinutes: Number(event.target.value) })} /><small>超过后建议重排</small></label></div><div className="notification-samples"><div><span>即将换盘</span><p>下一盘开始前提醒，并显示项目、盘号和设备。</p><i>开启</i></div><div><span>任务逾期</span><p>未确认开始时提醒，页面打开时自动重排。</p><i>开启</i></div><div><span>DDL 风险</span><p>失败缓冲不足或预计延期时立即提醒。</p><i>开启</i></div></div><button className="primary-button save-rules" onClick={onSave}>保存通知设置</button></section><aside className="phone-preview"><div className="phone-notch" /><span>现在</span><div className="bark-preview"><b>PRINTFLOW</b><strong>该换盘了</strong><p>{taskLabel}<br />{detailLabel}</p></div><small>提前 {settings.reminderMinutes} 分钟提醒</small></aside></div>;
 }

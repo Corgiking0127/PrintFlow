@@ -12,6 +12,7 @@ const defaultSettings = {
   overdueMinutes: 20,
   autoReschedule: true,
   failureBuffer: 8,
+  barkEndpoint: "https://api.day.app",
   barkKey: "",
 };
 

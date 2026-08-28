@@ -24,6 +24,7 @@ export type ScheduleSettings = {
   overdueMinutes: number;
   autoReschedule: boolean;
   failureBuffer: number;
+  barkEndpoint: string;
   barkKey: string;
 };
 
