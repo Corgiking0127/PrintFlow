@@ -19,6 +19,9 @@ test("integrated adapter uses the Bambu cloud MQTT brokers with verified TLS", (
 test("printer settings no longer require LAN-only credentials", () => {
   assert.doesNotMatch(pageSource, /LAN Access Code/);
   assert.doesNotMatch(pageSource, /局域网地址/);
+  assert.doesNotMatch(pageSource, /本地安全限制/);
+  assert.doesNotMatch(pageSource, /仅限本地配置/);
+  assert.doesNotMatch(pageSource, /adapter-note/);
   assert.match(pageSource, /中国区支持注册手机号/);
   assert.match(pageSource, /手机号验证码登录可留空/);
   assert.match(pageSource, /Bambu Handy 可继续使用/);
@@ -49,7 +52,7 @@ test("cloud token is resolved to a user id and checked against bound printers", 
       serial: "X2D123456",
       region: "global",
       accessToken: "a".repeat(32),
-      siteUrl: "http://localhost:8082",
+      siteUrl: "https://printflow.example.com",
       printerId: "printer-1",
       bridgeToken: "bridge-token",
       adapter: "bambu-x2d-ams2pro",
@@ -57,6 +60,7 @@ test("cloud token is resolved to a user id and checked against bound printers", 
     assert.equal(config.userId, "123456789");
     assert.equal(config.accessToken, "a".repeat(32));
     assert.equal(config.region, "global");
+    assert.equal(config.siteUrl, "https://printflow.example.com");
     assert.equal("account" in config, false);
     assert.equal("password" in config, false);
     assert.equal("verificationCode" in config, false);

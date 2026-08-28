@@ -378,7 +378,6 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
   const [accessToken, setAccessToken] = useState("");
   const [verificationRequired, setVerificationRequired] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [localMode, setLocalMode] = useState(false);
   const [localAdapter, setLocalAdapter] = useState<LocalAdapterStatus | null>(null);
 
   useEffect(() => {
@@ -394,21 +393,17 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
 
   useEffect(() => {
     let active = true;
-    const modeTimer = window.setTimeout(() => {
-      if (active) setLocalMode(["localhost", "127.0.0.1"].includes(window.location.hostname));
-    }, 0);
     const readLocalAdapter = () => fetch(`${LOCAL_ADAPTER_URL}/status`, { cache: "no-store" })
       .then((response) => response.ok ? response.json() : Promise.reject())
       .then((status: LocalAdapterStatus) => { if (active && status.mode === "cloud-mqtt") setLocalAdapter(status); })
       .catch(() => { if (active) setLocalAdapter(null); });
     void readLocalAdapter();
     const timer = window.setInterval(readLocalAdapter, 5000);
-    return () => { active = false; window.clearTimeout(modeTimer); window.clearInterval(timer); };
+    return () => { active = false; window.clearInterval(timer); };
   }, []);
 
   async function savePrinter(event: FormEvent) {
     event.preventDefault();
-    if (!localMode) return onToast("云端 MQTT Adapter 仅可从本机 PrintFlow 页面配置");
     if (!localAdapter) return onToast("本地 Adapter 暂时不可用，请使用 npm run local 启动完整服务");
     if (!serial.trim()) return onToast("请填写打印机序列号");
     const canReuseToken = localAdapter.configured && localAdapter.printer?.region === region;
@@ -472,8 +467,8 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
   return <>
     <section className={`notice-card printer-connection-notice ${online ? "online" : "neutral"}`}>
       <div className="notice-icon">{online ? "↯" : "▣"}</div>
-      <div><strong>{online ? "X2D 云端 MQTT 状态正在实时同步" : localMode ? localAdapter?.configured ? "云端 Adapter 已配置，正在等待打印机数据" : localAdapter ? "网页与云端 MQTT Adapter 已一体运行" : "本地 Adapter 暂时不可用" : "请使用本地 PrintFlow 配置云端 MQTT"}</strong><p>{localMode ? "打印机保持云端模式，Bambu Handy 可继续使用；无需开启 LAN Only 或 Developer Mode。" : "拓竹账号凭证只允许交给本机 Adapter，当前云端页面不会接收或保存这些信息。"}</p></div>
-      <span className={`live-badge ${online || (localMode && localAdapter?.connected) ? "connected" : ""}`}>{online ? "实时在线" : localAdapter?.connected ? "云端已连接" : localMode ? "等待云端" : "仅限本地配置"}</span>
+      <div><strong>{online ? "X2D 云端 MQTT 状态正在实时同步" : localAdapter?.configured ? "云端 Adapter 已配置，正在等待打印机数据" : localAdapter ? "云端 MQTT Adapter 已就绪" : "本地 Adapter 暂时不可用"}</strong><p>打印机保持云端模式，Bambu Handy 可继续使用；无需开启 LAN Only 或 Developer Mode。</p></div>
+      <span className={`live-badge ${online || localAdapter?.connected ? "connected" : ""}`}>{online ? "实时在线" : localAdapter?.connected ? "云端已连接" : localAdapter ? "等待云端" : "Adapter 离线"}</span>
     </section>
 
     <div className="printer-settings-layout">
@@ -499,7 +494,7 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
             <div className="tray-grid">{unit.trays.map((tray) => <div className={`tray-card ${tray.active ? "active" : ""}`} key={tray.id}><i style={{ background: tray.color }} /><span>{tray.name}</span><strong>{tray.material}</strong><small>{tray.remainingPercent === null ? "余量未知" : `剩余 ${tray.remainingPercent}%`}</small>{tray.active && <b>正在使用</b>}</div>)}</div>
           </article>)}</div>
           {telemetry.errors.length > 0 && <div className="printer-errors"><strong>设备告警</strong>{telemetry.errors.map((error) => <span key={error}>{error}</span>)}</div>}
-        </> : <div className="printer-empty"><span>↯</span><strong>等待第一条云端 MQTT 状态</strong><p>{localMode ? "登录拓竹账号后，Adapter 会从云端订阅 X2D 状态；打印进度、双喷嘴温度和 AMS 2 Pro 数据会在这里出现。" : "请从本机 PrintFlow 页面完成云端 MQTT 配置。"}</p></div>}
+        </> : <div className="printer-empty"><span>↯</span><strong>等待第一条云端 MQTT 状态</strong><p>登录拓竹账号后，Adapter 会从云端订阅 X2D 状态；打印进度、双喷嘴温度和 AMS 2 Pro 数据会在这里出现。</p></div>}
       </section>
 
       <aside className="content-card printer-config-card">
@@ -519,23 +514,19 @@ function PrintersView({ printers, onRefresh, onToast }: { printers: SavedPrinter
             <a href="https://github.com/Doridian/OpenBambuAPI/blob/main/mqtt.md" target="_blank" rel="noreferrer">查看社区协议说明 ↗</a>
           </details>
           <label><span>数据适配器</span><select value={X2D_AMS2_ADAPTER_ID} disabled><option value={X2D_AMS2_ADAPTER_ID}>X2D + AMS 2 Pro · 云端 MQTT</option></select></label>
-          <button className="primary-button config-save" disabled={saving || !localMode || !localAdapter}>{saving ? "正在登录并配置…" : localAdapter?.configured ? "保存并重连云端 MQTT" : "登录并连接云端 MQTT"}</button>
+          <button className="primary-button config-save" disabled={saving || !localAdapter}>{saving ? "正在登录并配置…" : localAdapter?.configured ? "保存并重连云端 MQTT" : "登录并连接云端 MQTT"}</button>
         </form>
 
-        {localMode ? <>
-          <div className={`bridge-download ${localAdapter?.connected ? "ready" : ""} local-adapter-card`}>
-            <div><span>云端 MQTT Adapter</span><strong>{localAdapter?.connected ? "MQTT 已连接" : localAdapter?.configured ? "正在连接" : localAdapter ? "等待登录" : "服务不可用"}</strong></div>
-            <p>{localAdapter?.printer ? `${localAdapter.printer.regionLabel} · ${localAdapter.printer.broker}:8883` : "网页和 Adapter 由同一个本地启动命令管理；打印机保持云端模式。"}</p>
-            <div className="local-adapter-meta"><span>状态上报</span><b>{localAdapter?.lastForwardAt ? new Date(localAdapter.lastForwardAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "尚未收到"}</b></div>
-            {localAdapter?.tokenExpiresAt && <div className="local-adapter-meta"><span>令牌预计有效至</span><b>{new Date(localAdapter.tokenExpiresAt).toLocaleDateString("zh-CN")}</b></div>}
-            {localAdapter?.lastError && <div className="local-adapter-error">{localAdapter.lastError}</div>}
-          </div>
-          <ol className="bridge-steps"><li><b>1</b><span><strong>保持打印机云端模式</strong><small>不要开启 LAN Only，Bambu Handy 可继续使用。</small></span></li><li><b>2</b><span><strong>本机完成登录</strong><small>密码和验证码不落盘，只保存访问令牌。</small></span></li><li><b>3</b><span><strong>保持 PrintFlow 运行</strong><small>退出本地服务后，云端 MQTT 同步会同时停止。</small></span></li></ol>
-        </> : <div className="bridge-download"><div><span>本地安全限制</span><strong>当前无法配置</strong></div><p>请运行本地 PrintFlow 并打开 `http://localhost:8082`。当前页面不会接收拓竹账号、密码或 Access Token。</p></div>}
+        <div className={`bridge-download ${localAdapter?.connected ? "ready" : ""} local-adapter-card`}>
+          <div><span>云端 MQTT Adapter</span><strong>{localAdapter?.connected ? "MQTT 已连接" : localAdapter?.configured ? "正在连接" : localAdapter ? "等待登录" : "服务不可用"}</strong></div>
+          <p>{localAdapter?.printer ? `${localAdapter.printer.regionLabel} · ${localAdapter.printer.broker}:8883` : "Adapter 在当前设备运行，并把打印机状态同步到 PrintFlow。"}</p>
+          <div className="local-adapter-meta"><span>状态上报</span><b>{localAdapter?.lastForwardAt ? new Date(localAdapter.lastForwardAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "尚未收到"}</b></div>
+          {localAdapter?.tokenExpiresAt && <div className="local-adapter-meta"><span>令牌预计有效至</span><b>{new Date(localAdapter.tokenExpiresAt).toLocaleDateString("zh-CN")}</b></div>}
+          {localAdapter?.lastError && <div className="local-adapter-error">{localAdapter.lastError}</div>}
+        </div>
+        <ol className="bridge-steps"><li><b>1</b><span><strong>保持打印机云端模式</strong><small>不要开启 LAN Only，Bambu Handy 可继续使用。</small></span></li><li><b>2</b><span><strong>完成账号登录</strong><small>密码和验证码不落盘，只保存访问令牌。</small></span></li><li><b>3</b><span><strong>保持 Adapter 运行</strong><small>Adapter 退出后，云端 MQTT 同步会停止。</small></span></li></ol>
       </aside>
     </div>
-
-    <section className="adapter-note"><div><span>适配器架构</span><strong>MQTT 原始数据 → X2D / AMS 2 Pro Adapter → 统一设备状态 → 排产与通知</strong></div><p>新增打印机型号时，只需增加对应适配器，不会改动排产页面和数据结构。</p></section>
   </>;
 }
 

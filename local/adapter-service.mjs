@@ -8,8 +8,6 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dataDirectory = resolve(process.env.PRINTFLOW_LOCAL_DATA_DIR || resolve(projectRoot, ".data"));
 const configPath = resolve(dataDirectory, "printer-config.json");
 const controlPort = Number(process.env.PRINTFLOW_ADAPTER_PORT || 8790);
-const webPort = Number(process.env.PRINTFLOW_WEB_PORT || 8082);
-const allowedOrigins = new Set((process.env.PRINTFLOW_LOCAL_ORIGINS || `http://localhost:${webPort},http://127.0.0.1:${webPort}`).split(",").map((value) => value.trim()).filter(Boolean));
 
 const cloudRegions = {
   global: { label: "国际区", apiHost: "api.bambulab.com", mqttHost: "us.mqtt.bambulab.com" },
@@ -66,7 +64,7 @@ function publicStatus() {
 
 function corsHeaders(origin) {
   return {
-    "Access-Control-Allow-Origin": allowedOrigins.has(origin) ? origin : `http://localhost:${webPort}`,
+    "Access-Control-Allow-Origin": origin || "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Allow-Private-Network": "true",
@@ -108,9 +106,7 @@ function validateBaseConfiguration(input) {
   if (adapter !== "bambu-x2d-ams2pro") throw new Error("当前仅支持 X2D + AMS 2 Pro 适配器");
 
   const target = new URL(siteUrl);
-  if (target.protocol !== "http:" || !["localhost", "127.0.0.1"].includes(target.hostname)) {
-    throw new Error("本地一体模式只接受 localhost 页面");
-  }
+  if (!["http:", "https:"].includes(target.protocol)) throw new Error("PrintFlow 页面地址必须使用 HTTP 或 HTTPS");
 
   return { name, serial, region, siteUrl, printerId, bridgeToken, adapter };
 }
@@ -305,11 +301,7 @@ async function loadSavedConfiguration() {
 
 const server = createServer(async (request, response) => {
   const origin = request.headers.origin || "";
-  if (request.method === "OPTIONS") {
-    if (!allowedOrigins.has(origin)) return sendJson(response, 403, { error: "不允许的页面来源" }, origin);
-    return sendJson(response, 204, {}, origin);
-  }
-  if (!allowedOrigins.has(origin)) return sendJson(response, 403, { error: "请从本机 PrintFlow 页面访问 Adapter" }, origin);
+  if (request.method === "OPTIONS") return sendJson(response, 204, {}, origin);
   const url = new URL(request.url || "/", `http://127.0.0.1:${controlPort}`);
   if (request.method === "GET" && url.pathname === "/status") return sendJson(response, 200, publicStatus(), origin);
   if (request.method === "POST" && url.pathname === "/configure") {

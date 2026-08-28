@@ -31,7 +31,7 @@ flowchart LR
   Cloud -->|MQTT/TLS| Adapter
 ```
 
-MQTT Adapter 只监听 `127.0.0.1:8790` 的本地配置接口。网页必须通过 `http://localhost:8082` 打开，才能登录拓竹账号；部署在 Sites 等云端的页面不会接收拓竹账号凭证。
+MQTT Adapter 监听 `127.0.0.1:8790` 的配置接口。PrintFlow 网页可以从本地地址、局域网地址或 Sites 打开，并连接当前设备上的 Adapter 完成拓竹账号登录。
 
 ## 快速开始
 

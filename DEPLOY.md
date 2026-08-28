@@ -52,8 +52,6 @@ npm run local
 PRINTFLOW_WEB_PORT=8082 PRINTFLOW_ADAPTER_PORT=8790 npm run local:start
 ```
 
-如果修改网页端口，还需要确保 `PRINTFLOW_LOCAL_ORIGINS` 包含实际本地 Origin。
-
 ## 4. 使用 systemd 常驻运行
 
 先完成构建：
@@ -135,9 +133,9 @@ sudo systemctl start printflow
 
 `.data/printer-config.json` 包含拓竹 Access Token 和 PrintFlow 内部凭证，备份必须加密并限制访问。它不包含拓竹账号、密码或验证码。恢复时将 `.data/` 放回项目根目录，确认所有者为 `printflow:printflow` 后启动服务。
 
-## 7. Sites 页面限制
+## 7. Sites 页面与本地 Adapter
 
-仓库仍保留 OpenAI Sites + D1 的兼容部署，但出于账号安全考虑，Sites 页面不会接收拓竹账号密码或 Access Token。打印机云端 MQTT 配置必须从 `http://localhost:8082` 完成。
+仓库保留 OpenAI Sites + D1 部署。Sites 页面、本地地址或局域网地址都可以连接当前设备上运行的 Adapter，完成拓竹账号登录和云端 MQTT 配置。
 
 云端发布时：
 
@@ -146,7 +144,7 @@ sudo systemctl start printflow
 3. 保存并部署私有 Sites 版本。
 4. 在受信任的本机运行云端 MQTT Adapter。
 
-本地一体模式不需要 ChatGPT 登录，也不会把拓竹 Token 上传到 Sites。
+拓竹登录请求由浏览器直接交给当前设备上的 Adapter；Adapter 登录成功后保存 Access Token，并把打印机状态同步到当前 PrintFlow API。
 
 ## 8. 阿里云边界
 
@@ -156,10 +154,9 @@ sudo systemctl start printflow
 
 ## 9. 故障排查
 
-### 页面没有显示“本地一体模式”
+### 页面显示“Adapter 离线”
 
 - 必须使用 `npm run local` 或 `npm run local:start`，而不是只运行 `npm run dev`。
-- 使用 `http://localhost:8082` 打开网页，不要使用云端 URL。
 - 检查 `127.0.0.1:8790` 是否被其他程序占用。
 
 ### Adapter 一直显示“正在连接”
