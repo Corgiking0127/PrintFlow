@@ -155,6 +155,7 @@ function WorkspaceApp({ initialUser, onSignedOut }: { initialUser: AuthUser; onS
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [importing, setImporting] = useState(false);
   const [imported, setImported] = useState(false);
+  const [importError, setImportError] = useState("");
   const [importProfile, setImportProfile] = useState<{ id: number | null; printer: string; title: string } | null>(null);
   const [toast, setToast] = useState("");
   const [queueMode, setQueueMode] = useState<"timeline" | "list">("timeline");
@@ -242,19 +243,35 @@ function WorkspaceApp({ initialUser, onSignedOut }: { initialUser: AuthUser; onS
     event.preventDefault();
     if (!draft.sourceUrl) return flash("请先粘贴 MakerWorld 链接");
     setImporting(true);
+    setImportError("");
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 25000);
     try {
-      const response = await fetch("/api/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: draft.sourceUrl }) });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "读取失败");
-      setDraft((current) => ({ ...current, ...data.project }));
-      setImportProfile(data.profile || null);
+      const response = await fetch("/api/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: draft.sourceUrl }), signal: controller.signal });
+      const contentType = response.headers.get("content-type") || "未提供";
+      const body = await response.text();
+      let data: Record<string, unknown>;
+      try {
+        data = JSON.parse(body) as Record<string, unknown>;
+      } catch {
+        throw new Error(`导入接口返回 HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}，但响应不是 JSON；Content-Type=${contentType}；响应长度=${body.length} 字符`);
+      }
+      if (!response.ok) throw new Error(typeof data.error === "string" ? data.error : `导入接口返回 HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`);
+      if (!data.project || typeof data.project !== "object") throw new Error("导入接口返回 HTTP 200 和有效 JSON，但缺少 project 对象");
+      setDraft((current) => ({ ...current, ...data.project as Partial<Draft> }));
+      setImportProfile(data.profile as { id: number | null; printer: string; title: string } || null);
       setImported(true);
       flash("已读取网页，请核对打印配置");
     } catch (error) {
-      flash(error instanceof Error ? error.message : "读取失败，可手动录入");
+      const message = error instanceof Error && error.name === "AbortError"
+        ? "浏览器等待 /api/import 25 秒仍未收到 HTTP 响应，已主动中止请求；服务端没有返回状态码或错误正文"
+        : error instanceof Error ? error.message : `未知错误：${String(error)}`;
+      setImportError(message);
+      flash("导入失败，详细原因已显示在链接下方");
       setImported(false);
       setImportProfile(null);
     } finally {
+      window.clearTimeout(timeout);
       setImporting(false);
     }
   }
@@ -428,6 +445,7 @@ function WorkspaceApp({ initialUser, onSignedOut }: { initialUser: AuthUser; onS
           <div className="modal-head"><div><span>MAKERWORLD IMPORT</span><h2 id="import-title">导入打印项目</h2></div><button onClick={() => setImportOpen(false)} aria-label="关闭">×</button></div>
           {!imported ? <form onSubmit={fetchMakerWorld} className="import-step">
             <label>MakerWorld 网页链接<input type="url" placeholder="https://makerworld.com.cn/zh/models/...#profileId-..." value={draft.sourceUrl} onChange={(event) => setDraft({ ...draft, sourceUrl: event.target.value })} /></label>
+            {importError && <div className="import-error" role="alert"><strong>导入失败</strong><p>{importError}</p></div>}
             <div className="import-hint"><b>系统将自动获取</b><div><span>✓ 项目名称</span><span>✓ 打印盘数</span><span>✓ 每盘打印时间</span><span>✓ 对应打印 Profile</span></div><p>带 #profileId 的链接会读取对应设备配置，排产时间更准确。</p></div>
             <button className="modal-primary" disabled={importing}>{importing ? "正在读取每盘数据…" : "读取网页并继续 →"}</button>
             <button type="button" className="modal-secondary" onClick={() => { setImportProfile(null); setImported(true); }}>暂时手动录入</button>

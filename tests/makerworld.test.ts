@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MakerWorldDesign, MakerWorldProfileNotFoundError, fetchMakerWorldDesign, makerWorldApiHost, parseMakerWorldDesign, parseMakerWorldProxyDocument } from "../lib/makerworld";
+import { MakerWorldDesign, MakerWorldFetchError, MakerWorldProfileNotFoundError, fetchMakerWorldDesign, makerWorldApiHost, parseMakerWorldDesign, parseMakerWorldProxyDocument } from "../lib/makerworld";
 
 const design: MakerWorldDesign = {
   title: "多盘测试模型",
@@ -79,6 +79,61 @@ test("structured import falls back to the proxy when direct Bambu access is bloc
     "https://api.bambulab.com/v1/design-service/design/123",
     "https://r.jina.ai/https://api.bambulab.com/v1/design-service/design/123",
   ]);
+});
+
+test("failed imports report the exact HTTP failure for both data sources", async () => {
+  const fetcher = async (input: string | URL | Request) => String(input).startsWith("https://r.jina.ai/")
+    ? new Response("upstream unavailable", { status: 502, statusText: "Bad Gateway" })
+    : new Response("forbidden", { status: 403, statusText: "Forbidden" });
+  await assert.rejects(
+    () => fetchMakerWorldDesign("https://api.bambulab.com/v1/design-service/design/123", fetcher as typeof fetch),
+    (error: unknown) => {
+      assert.ok(error instanceof MakerWorldFetchError);
+      assert.deepEqual(error.attempts.map(({ source, reason }) => ({ source, reason })), [
+        { source: "official", reason: "Error: HTTP 403 Forbidden" },
+        { source: "proxy", reason: "Error: HTTP 502 Bad Gateway" },
+      ]);
+      assert.match(error.message, /api\.bambulab\.com.*HTTP 403 Forbidden/);
+      assert.match(error.message, /r\.jina\.ai.*HTTP 502 Bad Gateway/);
+      return true;
+    },
+  );
+});
+
+test("stalled imports stop at configured deadlines and name both timeouts", async () => {
+  const stalledFetch = (() => new Promise<Response>(() => undefined)) as typeof fetch;
+  await assert.rejects(
+    () => fetchMakerWorldDesign(
+      "https://api.bambulab.cn/v1/design-service/design/123",
+      stalledFetch,
+      { officialTimeoutMs: 10, proxyTimeoutMs: 15 },
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof MakerWorldFetchError);
+      assert.deepEqual(error.attempts.map(({ source, reason }) => ({ source, reason })), [
+        { source: "official", reason: "请求在 10ms 内未完成，已主动中止" },
+        { source: "proxy", reason: "请求在 15ms 内未完成，已主动中止" },
+      ]);
+      return true;
+    },
+  );
+});
+
+test("timeouts also cover a response body that starts but never finishes", async () => {
+  const stalledBodyFetch = (async () => new Response(new ReadableStream({ start() { /* intentionally left open */ } }))) as typeof fetch;
+  await assert.rejects(
+    () => fetchMakerWorldDesign(
+      "https://api.bambulab.com/v1/design-service/design/123",
+      stalledBodyFetch,
+      { officialTimeoutMs: 10, proxyTimeoutMs: 15 },
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof MakerWorldFetchError);
+      assert.match(error.attempts[0].reason, /10ms/);
+      assert.match(error.attempts[1].reason, /15ms/);
+      return true;
+    },
+  );
 });
 
 test("shared profileId fragment selects MakerWorld instance.id instead of the first profile", () => {

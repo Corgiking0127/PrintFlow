@@ -30,6 +30,48 @@ export type MakerWorldDesign = {
   instances?: MakerWorldInstance[];
 };
 
+export type MakerWorldFetchAttempt = {
+  source: "official" | "proxy";
+  url: string;
+  reason: string;
+};
+
+export type MakerWorldFetchOptions = {
+  officialTimeoutMs?: number;
+  proxyTimeoutMs?: number;
+};
+
+class MakerWorldAttemptError extends Error {
+  attempt: MakerWorldFetchAttempt;
+
+  constructor(attempt: MakerWorldFetchAttempt) {
+    super(attempt.reason);
+    this.name = "MakerWorldAttemptError";
+    this.attempt = attempt;
+  }
+}
+
+class MakerWorldTimeoutError extends Error {
+  timeoutMs: number;
+
+  constructor(timeoutMs: number) {
+    super(`请求在 ${timeoutMs}ms 内未完成，已主动中止`);
+    this.name = "MakerWorldTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+export class MakerWorldFetchError extends Error {
+  code = "MAKERWORLD_FETCH_FAILED" as const;
+  attempts: MakerWorldFetchAttempt[];
+
+  constructor(attempts: MakerWorldFetchAttempt[]) {
+    super(`MakerWorld 结构化数据读取失败：${attempts.map((attempt) => `${attempt.source === "official" ? "官方接口" : "备用接口"} ${attempt.url}：${attempt.reason}`).join("；")}`);
+    this.name = "MakerWorldFetchError";
+    this.attempts = attempts;
+  }
+}
+
 function isMakerWorldDesign(value: unknown): value is MakerWorldDesign {
   return Boolean(value && typeof value === "object" && Array.isArray((value as MakerWorldDesign).instances));
 }
@@ -49,22 +91,89 @@ export function parseMakerWorldProxyDocument(document: string) {
   }
 }
 
-export async function fetchMakerWorldDesign(apiUrl: string, fetcher: typeof fetch = fetch) {
-  try {
-    const response = await fetcher(apiUrl, { headers: { Accept: "application/json" } });
-    if (response.ok) {
-      const design = await response.json() as unknown;
-      if (isMakerWorldDesign(design)) return design;
-    }
-  } catch {
-    // Continue with the proxy below when the deployment network cannot reach Bambu directly.
+function describeFetchError(error: unknown) {
+  if (error instanceof MakerWorldTimeoutError) return error.message;
+  if (error instanceof Error) {
+    const cause = error.cause && typeof error.cause === "object" ? error.cause as { code?: unknown; message?: unknown } : null;
+    const causeParts = [cause?.code, cause?.message].filter(Boolean).map(String);
+    return `${error.name}: ${error.message}${causeParts.length ? `（底层原因：${causeParts.join(" / ")}）` : ""}`;
   }
+  return String(error);
+}
 
+async function runWithTimeout<T>(timeoutMs: number, operation: (signal: AbortSignal) => Promise<T>) {
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      controller.abort();
+      reject(new MakerWorldTimeoutError(timeoutMs));
+    }, timeoutMs);
+  });
   try {
-    const response = await fetcher(`https://r.jina.ai/${apiUrl}`, { headers: { Accept: "text/plain" } });
-    return response.ok ? parseMakerWorldProxyDocument(await response.text()) : null;
-  } catch {
-    return null;
+    return await Promise.race([operation(controller.signal), deadline]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function fetchOfficialDesign(apiUrl: string, timeoutMs: number, fetcher: typeof fetch) {
+  try {
+    return await runWithTimeout(timeoutMs, async (signal) => {
+      const response = await fetcher(apiUrl, { headers: { Accept: "application/json" }, signal });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`);
+      }
+      let design: unknown;
+      try {
+        design = await response.json();
+      } catch (error) {
+        throw new Error(`HTTP 200，但响应不是有效 JSON：${describeFetchError(error)}；Content-Type=${response.headers.get("content-type") || "未提供"}`);
+      }
+      if (!isMakerWorldDesign(design)) throw new Error("HTTP 200 且 JSON 可解析，但缺少 instances 数组");
+      return design;
+    });
+  } catch (error) {
+    throw new MakerWorldAttemptError({ source: "official", url: apiUrl, reason: describeFetchError(error) });
+  }
+}
+
+async function fetchProxyDesign(apiUrl: string, timeoutMs: number, fetcher: typeof fetch) {
+  const proxyUrl = `https://r.jina.ai/${apiUrl}`;
+  try {
+    return await runWithTimeout(timeoutMs, async (signal) => {
+      const response = await fetcher(proxyUrl, { headers: { Accept: "text/plain" }, signal });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`);
+      }
+      const contentType = response.headers.get("content-type") || "未提供";
+      const document = await response.text();
+      const design = parseMakerWorldProxyDocument(document);
+      if (!design) throw new Error(`HTTP 200，但响应无法解析为 MakerWorld JSON；Content-Type=${contentType}；响应长度=${document.length} 字符`);
+      return design;
+    });
+  } catch (error) {
+    throw new MakerWorldAttemptError({ source: "proxy", url: proxyUrl, reason: describeFetchError(error) });
+  }
+}
+
+export async function fetchMakerWorldDesign(
+  apiUrl: string,
+  fetcher: typeof fetch = fetch,
+  options: MakerWorldFetchOptions = {},
+) {
+  const attempts = [
+    fetchOfficialDesign(apiUrl, options.officialTimeoutMs ?? 10000, fetcher),
+    fetchProxyDesign(apiUrl, options.proxyTimeoutMs ?? 22000, fetcher),
+  ];
+  try {
+    return await Promise.any(attempts);
+  } catch (error) {
+    const failures = error instanceof AggregateError
+      ? error.errors.filter((failure): failure is MakerWorldAttemptError => failure instanceof MakerWorldAttemptError)
+      : [];
+    const details = failures.map((failure) => failure.attempt).sort((left, right) => left.source === "official" ? -1 : right.source === "official" ? 1 : 0);
+    throw new MakerWorldFetchError(details.length ? details : [{ source: "official", url: apiUrl, reason: describeFetchError(error) }]);
   }
 }
 
@@ -139,9 +248,13 @@ function selectProfile(design: MakerWorldDesign, requestedId: number | null) {
 }
 
 export class MakerWorldProfileNotFoundError extends Error {
+  code = "MAKERWORLD_PROFILE_NOT_FOUND" as const;
+  profileId: number;
+
   constructor(profileId: number) {
     super(`链接指定的打印配置（${profileId}）已失效或不存在，请从 MakerWorld 打印配置页面重新复制链接`);
     this.name = "MakerWorldProfileNotFoundError";
+    this.profileId = profileId;
   }
 }
 
