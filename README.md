@@ -33,6 +33,8 @@ flowchart LR
 
 网页、API、数据库和 MQTT Adapter 由同一个启动命令管理，对局域网只开放一个 `8082` 端口。浏览器始终调用当前 PrintFlow 地址下的同源 API，不会访问浏览器设备自身的 `127.0.0.1`。
 
+MakerWorld 导入同样由这个一体入口执行：Node 网关直接连接对应区域的拓竹官方 API，再把结构化数据交给内部排产 API 解析。这样不会经过 Cloudflare Workers 的外部 TLS 链路，也没有第三方备用线路。
+
 ## 快速开始
 
 需要 Node.js `>= 22.13.0`。

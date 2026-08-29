@@ -1,4 +1,5 @@
-import { MakerWorldFetchError, MakerWorldProfileNotFoundError, fetchMakerWorldDesign, makerWorldApiHost, parseMakerWorldDesign, requestedMakerWorldProfileId, serializeErrorForDiagnostics } from "../../../lib/makerworld";
+import { env } from "cloudflare:workers";
+import { MakerWorldDesign, MakerWorldFetchError, MakerWorldProfileNotFoundError, fetchMakerWorldDesign, makerWorldApiHost, parseMakerWorldDesign, requestedMakerWorldProfileId, serializeErrorForDiagnostics } from "../../../lib/makerworld";
 import { requireUser } from "../../../lib/auth";
 
 function runtimeDetails() {
@@ -8,13 +9,13 @@ function runtimeDetails() {
   };
 }
 
-async function readStructuredProject(target: URL) {
+async function readStructuredProject(target: URL, injectedDesign?: MakerWorldDesign) {
   const designId = target.pathname.match(/\/models\/(\d+)/)?.[1];
   const apiHost = makerWorldApiHost(target);
   if (!designId) throw new Error(`链接路径 ${target.pathname} 中未找到 /models/<数字模型ID>`);
   if (!apiHost) throw new Error(`不支持的 MakerWorld 域名：${target.hostname}`);
   const apiUrl = `https://${apiHost}/v1/design-service/design/${designId}`;
-  const design = await fetchMakerWorldDesign(apiUrl);
+  const design = injectedDesign || await fetchMakerWorldDesign(apiUrl);
   const project = parseMakerWorldDesign(design, target);
   if (!project) {
     const profileId = requestedMakerWorldProfileId(target);
@@ -30,15 +31,22 @@ export async function POST(request: Request) {
   try {
     const auth = await requireUser(request);
     if ("response" in auth) return auth.response;
-    const { url } = (await request.json()) as { url?: string };
+    const { url, design } = (await request.json()) as { url?: string; design?: MakerWorldDesign };
     if (!url) return Response.json({ error: "请粘贴 MakerWorld 链接" }, { status: 400 });
+    if (design) {
+      const expectedSecret = String((env as unknown as Record<string, unknown>).PRINTFLOW_INTERNAL_SECRET || "");
+      const suppliedSecret = request.headers.get("x-printflow-internal-secret") || "";
+      if (!expectedSecret || suppliedSecret !== expectedSecret) {
+        return Response.json({ error: "不允许从外部注入 MakerWorld 结构化数据" }, { status: 403 });
+      }
+    }
     const target = new URL(url);
     if (!makerWorldApiHost(target)) {
       return Response.json({ error: "目前仅支持 makerworld.com 和 makerworld.com.cn 链接" }, { status: 400 });
     }
 
     return Response.json({
-      ...await readStructuredProject(target),
+      ...await readStructuredProject(target, design),
       confidence: { name: "high", plates: "high", duration: "high", perPlate: "high" },
       note: "已读取每个打印盘的独立时长；可选择整项目排产或拆分到每盘。",
     });

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
 import { createServer, request as createProxyRequest } from "node:http";
 import { networkInterfaces } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -11,6 +12,7 @@ import {
   stopAdapterService,
   VerificationRequiredError,
 } from "./adapter-service.mjs";
+import { fetchMakerWorldForLocalGateway, makerWorldGatewayErrorPayload } from "./makerworld-import.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const webPort = Number(process.env.PRINTFLOW_WEB_PORT || 8082);
@@ -20,6 +22,7 @@ const internalWebIp = "127.0.0.1";
 const internalSiteUrl = `http://${webIp === "0.0.0.0" ? "127.0.0.1" : webIp}:${webPort}`;
 const persistDirectory = String(process.env.PRINTFLOW_WRANGLER_PERSIST_DIR || ".data/wrangler");
 const wrangler = resolve(projectRoot, "node_modules/.bin/wrangler");
+const internalSecret = randomBytes(32).toString("hex");
 const children = [];
 const useProcessGroups = process.platform !== "win32";
 let stopping = false;
@@ -61,6 +64,28 @@ function proxyToWeb(request, response) {
   request.pipe(upstream);
 }
 
+function forwardImportedDesign(request, response, payload) {
+  const body = Buffer.from(JSON.stringify(payload));
+  const upstream = createProxyRequest({
+    hostname: internalWebIp,
+    port: internalWebPort,
+    path: "/api/import",
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "content-length": String(body.length),
+      cookie: request.headers.cookie || "",
+      "x-printflow-internal-secret": internalSecret,
+    },
+  }, (upstreamResponse) => {
+    response.writeHead(upstreamResponse.statusCode || 502, upstreamResponse.headers);
+    upstreamResponse.pipe(response);
+  });
+  upstream.on("error", () => sendJson(response, 502, { error: "PrintFlow 内部导入服务不可用" }));
+  upstream.end(body);
+}
+
 function isAuthenticated(request) {
   return new Promise((resolveAuth) => {
     const upstream = createProxyRequest({
@@ -88,6 +113,21 @@ function isAuthenticated(request) {
 
 const gateway = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || `localhost:${webPort}`}`);
+  if (url.pathname === "/api/import") {
+    if (request.method !== "POST") return sendJson(response, 405, { error: "请求方法不支持" });
+    if (!(await isAuthenticated(request))) return sendJson(response, 401, { error: "请先登录" });
+    const requestId = randomUUID();
+    const startedAtMs = Date.now();
+    try {
+      const payload = await readJson(request);
+      const imported = await fetchMakerWorldForLocalGateway(payload.url);
+      return forwardImportedDesign(request, response, { url: payload.url, design: imported.design });
+    } catch (error) {
+      const failure = makerWorldGatewayErrorPayload(error, requestId, startedAtMs);
+      console.error(`[PrintFlow MakerWorld gateway ${requestId}]\n${JSON.stringify(failure.body.errorLog, null, 2)}`);
+      return sendJson(response, failure.status, failure.body);
+    }
+  }
   if (url.pathname === "/api/adapter/status") {
     if (!(await isAuthenticated(request))) return sendJson(response, 401, { error: "请先登录" });
     if (request.method === "GET") return sendJson(response, 200, getAdapterStatus());
@@ -133,6 +173,8 @@ function runWebService() {
     String(internalWebPort),
     "--persist-to",
     persistDirectory,
+    "--var",
+    `PRINTFLOW_INTERNAL_SECRET:${internalSecret}`,
   ], {
     cwd: projectRoot,
     env: process.env,
