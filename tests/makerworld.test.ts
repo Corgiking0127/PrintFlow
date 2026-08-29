@@ -81,6 +81,27 @@ test("structured import falls back to the proxy when direct Bambu access is bloc
   ]);
 });
 
+test("China fallback avoids the Worker TLS-chain failure without disabling verification", async () => {
+  const requests: string[] = [];
+  const fetcher = async (input: string | URL | Request) => {
+    const url = String(input);
+    requests.push(url);
+    if (url.startsWith("https://api.bambulab.cn/")) {
+      throw new Error("kj/compat/tls.c++:269: failed: TLS peer's certificate is not trusted; reason = unable to get local issuer certificate");
+    }
+    return new Response(`Title: \n\nMarkdown Content:\n${JSON.stringify(design)}`);
+  };
+  const result = await fetchMakerWorldDesign(
+    "https://api.bambulab.cn/v1/design-service/design/2875585",
+    fetcher as typeof fetch,
+  );
+  assert.deepEqual(result, design);
+  assert.deepEqual(requests, [
+    "https://api.bambulab.cn/v1/design-service/design/2875585",
+    "https://r.jina.ai/http://api.bambulab.cn/v1/design-service/design/2875585",
+  ]);
+});
+
 test("failed imports report the exact HTTP failure for both data sources", async () => {
   const fetcher = async (input: string | URL | Request) => String(input).startsWith("https://r.jina.ai/")
     ? new Response("upstream unavailable", { status: 502, statusText: "Bad Gateway" })
@@ -90,11 +111,40 @@ test("failed imports report the exact HTTP failure for both data sources", async
     (error: unknown) => {
       assert.ok(error instanceof MakerWorldFetchError);
       assert.deepEqual(error.attempts.map(({ source, reason }) => ({ source, reason })), [
-        { source: "official", reason: "Error: HTTP 403 Forbidden" },
-        { source: "proxy", reason: "Error: HTTP 502 Bad Gateway" },
+        { source: "official", reason: "MakerWorldResponseError: HTTP 403 Forbidden" },
+        { source: "proxy", reason: "MakerWorldResponseError: HTTP 502 Bad Gateway" },
       ]);
       assert.match(error.message, /api\.bambulab\.com.*HTTP 403 Forbidden/);
       assert.match(error.message, /r\.jina\.ai.*HTTP 502 Bad Gateway/);
+      assert.equal(error.attempts[0].method, "GET");
+      assert.equal(error.attempts[0].requestHeaders.Accept, "application/json");
+      assert.equal(error.attempts[0].timeoutMs, 10000);
+      assert.equal(typeof error.attempts[0].durationMs, "number");
+      assert.equal(error.attempts[0].response?.status, 403);
+      assert.equal(error.attempts[0].response?.body, "forbidden");
+      assert.equal(error.attempts[0].response?.bodyTruncated, false);
+      assert.match(JSON.stringify(error.attempts[0].error), /MakerWorldResponseError/);
+      assert.match(JSON.stringify(error.attempts[0].error), /stack/);
+      return true;
+    },
+  );
+});
+
+test("platform internal-error references and original stacks are preserved", async () => {
+  const internalError = new Error("internal error; reference = sdv7v5jj4993ijt45e7rsqef");
+  internalError.stack = "Error: internal error\n    at cloudflareFetch (worker.js:42:7)";
+  const fetcher = async (input: string | URL | Request) => {
+    if (!String(input).startsWith("https://r.jina.ai/")) throw internalError;
+    return new Response("gateway timeout", { status: 504, statusText: "Gateway Timeout", headers: { "cf-ray": "test-ray" } });
+  };
+  await assert.rejects(
+    () => fetchMakerWorldDesign("https://api.bambulab.cn/v1/design-service/design/2875585", fetcher as typeof fetch),
+    (error: unknown) => {
+      assert.ok(error instanceof MakerWorldFetchError);
+      assert.equal(error.attempts[0].referenceId, "sdv7v5jj4993ijt45e7rsqef");
+      assert.match(JSON.stringify(error.attempts[0].error), /cloudflareFetch/);
+      assert.equal(error.attempts[1].response?.headers["cf-ray"], "test-ray");
+      assert.equal(error.attempts[1].response?.body, "gateway timeout");
       return true;
     },
   );

@@ -1,5 +1,12 @@
-import { MakerWorldFetchError, MakerWorldProfileNotFoundError, fetchMakerWorldDesign, makerWorldApiHost, parseMakerWorldDesign, requestedMakerWorldProfileId } from "../../../lib/makerworld";
+import { MakerWorldFetchError, MakerWorldProfileNotFoundError, fetchMakerWorldDesign, makerWorldApiHost, parseMakerWorldDesign, requestedMakerWorldProfileId, serializeErrorForDiagnostics } from "../../../lib/makerworld";
 import { requireUser } from "../../../lib/auth";
+
+function runtimeDetails() {
+  return {
+    userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "navigator unavailable",
+    nodeVersion: typeof process !== "undefined" ? process.version : "process unavailable",
+  };
+}
 
 async function readStructuredProject(target: URL) {
   const designId = target.pathname.match(/\/models\/(\d+)/)?.[1];
@@ -17,6 +24,9 @@ async function readStructuredProject(target: URL) {
 }
 
 export async function POST(request: Request) {
+  const requestId = crypto.randomUUID();
+  const startedAtMs = Date.now();
+  const startedAt = new Date(startedAtMs).toISOString();
   try {
     const auth = await requireUser(request);
     if ("response" in auth) return auth.response;
@@ -33,14 +43,26 @@ export async function POST(request: Request) {
       note: "已读取每个打印盘的独立时长；可选择整项目排产或拆分到每盘。",
     });
   } catch (error) {
+    const finishedAtMs = Date.now();
+    const errorLog = {
+      requestId,
+      startedAt,
+      finishedAt: new Date(finishedAtMs).toISOString(),
+      durationMs: finishedAtMs - startedAtMs,
+      runtime: runtimeDetails(),
+      request: { method: request.method, endpoint: new URL(request.url).pathname },
+      error: serializeErrorForDiagnostics(error),
+      attempts: error instanceof MakerWorldFetchError ? error.attempts : [],
+    };
+    console.error(`[PrintFlow MakerWorld import ${requestId}]\n${JSON.stringify(errorLog, null, 2)}`);
     if (error instanceof MakerWorldFetchError) {
-      return Response.json({ error: error.message, code: error.code, attempts: error.attempts }, { status: 504 });
+      return Response.json({ error: error.message, code: error.code, attempts: error.attempts, errorLog }, { status: 504 });
     }
     if (error instanceof MakerWorldProfileNotFoundError) {
-      return Response.json({ error: error.message, code: error.code, profileId: error.profileId }, { status: 422 });
+      return Response.json({ error: error.message, code: error.code, profileId: error.profileId, errorLog }, { status: 422 });
     }
     return Response.json(
-      { error: error instanceof Error ? error.message : "无法读取该页面" },
+      { error: error instanceof Error ? error.message : "无法读取该页面", code: "MAKERWORLD_IMPORT_UNEXPECTED", errorLog },
       { status: 502 },
     );
   }

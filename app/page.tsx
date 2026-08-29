@@ -34,6 +34,23 @@ type LocalAdapterStatus = {
   printer: { name: string; serial: string; adapter: string; region: CloudRegion; regionLabel: string; broker: string } | null;
 };
 
+class ImportRequestError extends Error {
+  diagnostics: unknown;
+
+  constructor(message: string, diagnostics: unknown) {
+    super(message);
+    this.name = "ImportRequestError";
+    this.diagnostics = diagnostics;
+  }
+}
+
+function clientErrorDetails(error: unknown) {
+  if (error instanceof Error) {
+    return { name: error.name, message: error.message, stack: error.stack || null, cause: error.cause || null };
+  }
+  return { type: typeof error, value: String(error) };
+}
+
 const emptyDraft: Draft = { name: "", sourceUrl: "", plates: 1, durationMinutes: 60, plateDurations: [], plateNames: [], splitByPlate: false, urgent: false, deadline: null, material: "PLA", color: "自然色" };
 
 function postState(payload: Record<string, unknown>) {
@@ -156,6 +173,7 @@ function WorkspaceApp({ initialUser, onSignedOut }: { initialUser: AuthUser; onS
   const [importing, setImporting] = useState(false);
   const [imported, setImported] = useState(false);
   const [importError, setImportError] = useState("");
+  const [importErrorLog, setImportErrorLog] = useState("");
   const [importProfile, setImportProfile] = useState<{ id: number | null; printer: string; title: string } | null>(null);
   const [toast, setToast] = useState("");
   const [queueMode, setQueueMode] = useState<"timeline" | "list">("timeline");
@@ -244,20 +262,38 @@ function WorkspaceApp({ initialUser, onSignedOut }: { initialUser: AuthUser; onS
     if (!draft.sourceUrl) return flash("请先粘贴 MakerWorld 链接");
     setImporting(true);
     setImportError("");
+    setImportErrorLog("");
+    const requestStartedAtMs = Date.now();
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 25000);
     try {
       const response = await fetch("/api/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: draft.sourceUrl }), signal: controller.signal });
       const contentType = response.headers.get("content-type") || "未提供";
       const body = await response.text();
+      const responseDetails = {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers.entries()),
+        body,
+      };
       let data: Record<string, unknown>;
       try {
         data = JSON.parse(body) as Record<string, unknown>;
       } catch {
-        throw new Error(`导入接口返回 HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}，但响应不是 JSON；Content-Type=${contentType}；响应长度=${body.length} 字符`);
+        throw new ImportRequestError(
+          `导入接口返回 HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}，但响应不是 JSON；Content-Type=${contentType}；响应长度=${body.length} 字符`,
+          { stage: "parse_api_response", response: responseDetails },
+        );
       }
-      if (!response.ok) throw new Error(typeof data.error === "string" ? data.error : `导入接口返回 HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`);
-      if (!data.project || typeof data.project !== "object") throw new Error("导入接口返回 HTTP 200 和有效 JSON，但缺少 project 对象");
+      if (!response.ok) {
+        throw new ImportRequestError(
+          typeof data.error === "string" ? data.error : `导入接口返回 HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`,
+          { stage: "api_error_response", response: responseDetails, parsedBody: data, serverErrorLog: data.errorLog || null },
+        );
+      }
+      if (!data.project || typeof data.project !== "object") {
+        throw new ImportRequestError("导入接口返回 HTTP 200 和有效 JSON，但缺少 project 对象", { stage: "validate_api_response", response: responseDetails, parsedBody: data });
+      }
       setDraft((current) => ({ ...current, ...data.project as Partial<Draft> }));
       setImportProfile(data.profile as { id: number | null; printer: string; title: string } || null);
       setImported(true);
@@ -266,13 +302,33 @@ function WorkspaceApp({ initialUser, onSignedOut }: { initialUser: AuthUser; onS
       const message = error instanceof Error && error.name === "AbortError"
         ? "浏览器等待 /api/import 25 秒仍未收到 HTTP 响应，已主动中止请求；服务端没有返回状态码或错误正文"
         : error instanceof Error ? error.message : `未知错误：${String(error)}`;
+      const finishedAtMs = Date.now();
+      const diagnostics = error instanceof ImportRequestError ? error.diagnostics : {
+        stage: error instanceof Error && error.name === "AbortError" ? "client_timeout" : "client_exception",
+        endpoint: "/api/import",
+        timeoutMs: 25000,
+        startedAt: new Date(requestStartedAtMs).toISOString(),
+        finishedAt: new Date(finishedAtMs).toISOString(),
+        durationMs: finishedAtMs - requestStartedAtMs,
+        error: clientErrorDetails(error),
+      };
       setImportError(message);
+      setImportErrorLog(JSON.stringify(diagnostics, null, 2));
       flash("导入失败，详细原因已显示在链接下方");
       setImported(false);
       setImportProfile(null);
     } finally {
       window.clearTimeout(timeout);
       setImporting(false);
+    }
+  }
+
+  async function copyImportErrorLog() {
+    try {
+      await navigator.clipboard.writeText(importErrorLog);
+      flash("完整错误日志已复制");
+    } catch (error) {
+      flash(`复制失败：${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -445,7 +501,7 @@ function WorkspaceApp({ initialUser, onSignedOut }: { initialUser: AuthUser; onS
           <div className="modal-head"><div><span>MAKERWORLD IMPORT</span><h2 id="import-title">导入打印项目</h2></div><button onClick={() => setImportOpen(false)} aria-label="关闭">×</button></div>
           {!imported ? <form onSubmit={fetchMakerWorld} className="import-step">
             <label>MakerWorld 网页链接<input type="url" placeholder="https://makerworld.com.cn/zh/models/...#profileId-..." value={draft.sourceUrl} onChange={(event) => setDraft({ ...draft, sourceUrl: event.target.value })} /></label>
-            {importError && <div className="import-error" role="alert"><strong>导入失败</strong><p>{importError}</p></div>}
+            {importError && <div className="import-error" role="alert"><strong>导入失败</strong><p>{importError}</p>{importErrorLog && <details open><summary>完整错误日志</summary><pre>{importErrorLog}</pre><button type="button" onClick={copyImportErrorLog}>复制完整日志</button></details>}</div>}
             <div className="import-hint"><b>系统将自动获取</b><div><span>✓ 项目名称</span><span>✓ 打印盘数</span><span>✓ 每盘打印时间</span><span>✓ 对应打印 Profile</span></div><p>带 #profileId 的链接会读取对应设备配置，排产时间更准确。</p></div>
             <button className="modal-primary" disabled={importing}>{importing ? "正在读取每盘数据…" : "读取网页并继续 →"}</button>
             <button type="button" className="modal-secondary" onClick={() => { setImportProfile(null); setImported(true); }}>暂时手动录入</button>
