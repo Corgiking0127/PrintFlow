@@ -56,7 +56,8 @@ export async function POST(request: Request) {
     };
     console.error(`[PrintFlow MakerWorld import ${requestId}]\n${JSON.stringify(errorLog, null, 2)}`);
     if (error instanceof MakerWorldFetchError) {
-      return Response.json({ error: error.message, code: error.code, attempts: error.attempts, errorLog }, { status: 504 });
+      const status = error.code === "MAKERWORLD_UPSTREAM_TIMEOUT" ? 504 : 502;
+      return Response.json({ error: error.message, code: error.code, attempts: error.attempts, errorLog }, { status });
     }
     if (error instanceof MakerWorldProfileNotFoundError) {
       return Response.json({ error: error.message, code: error.code, profileId: error.profileId, errorLog }, { status: 422 });

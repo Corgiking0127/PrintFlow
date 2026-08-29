@@ -31,7 +31,8 @@ export type MakerWorldDesign = {
 };
 
 export type MakerWorldFetchAttempt = {
-  source: "official" | "proxy";
+  source: "official";
+  failureType: "timeout" | "platform" | "network" | "http" | "payload";
   url: string;
   method: "GET";
   requestHeaders: Record<string, string>;
@@ -56,7 +57,6 @@ export type MakerWorldHttpResponseLog = {
 
 export type MakerWorldFetchOptions = {
   officialTimeoutMs?: number;
-  proxyTimeoutMs?: number;
 };
 
 class MakerWorldAttemptError extends Error {
@@ -81,21 +81,32 @@ class MakerWorldTimeoutError extends Error {
 
 class MakerWorldResponseError extends Error {
   response: MakerWorldHttpResponseLog;
+  failureType: "http" | "payload";
 
-  constructor(message: string, response: MakerWorldHttpResponseLog, cause?: unknown) {
+  constructor(message: string, response: MakerWorldHttpResponseLog, failureType: "http" | "payload", cause?: unknown) {
     super(message, cause === undefined ? undefined : { cause });
     this.name = "MakerWorldResponseError";
     this.response = response;
+    this.failureType = failureType;
   }
 }
 
 export class MakerWorldFetchError extends Error {
-  code = "MAKERWORLD_FETCH_FAILED" as const;
+  code: "MAKERWORLD_UPSTREAM_TIMEOUT" | "MAKERWORLD_RUNTIME_FETCH_FAILED" | "MAKERWORLD_UPSTREAM_HTTP_ERROR" | "MAKERWORLD_INVALID_RESPONSE" | "MAKERWORLD_NETWORK_ERROR";
   attempts: MakerWorldFetchAttempt[];
 
   constructor(attempts: MakerWorldFetchAttempt[]) {
-    super(`MakerWorld 结构化数据读取失败：${attempts.map((attempt) => `${attempt.source === "official" ? "官方接口" : "备用接口"} ${attempt.url}：${attempt.reason}`).join("；")}`);
+    const failureType = attempts[0]?.failureType || "network";
+    const codeByFailureType = {
+      timeout: "MAKERWORLD_UPSTREAM_TIMEOUT",
+      platform: "MAKERWORLD_RUNTIME_FETCH_FAILED",
+      http: "MAKERWORLD_UPSTREAM_HTTP_ERROR",
+      payload: "MAKERWORLD_INVALID_RESPONSE",
+      network: "MAKERWORLD_NETWORK_ERROR",
+    } as const;
+    super(`MakerWorld 官方结构化接口读取失败：${attempts.map((attempt) => `${attempt.url}：${attempt.reason}`).join("；")}`);
     this.name = "MakerWorldFetchError";
+    this.code = codeByFailureType[failureType];
     this.attempts = attempts;
   }
 }
@@ -145,21 +156,6 @@ function responseLog(response: Response, body: string): MakerWorldHttpResponseLo
   };
 }
 
-export function parseMakerWorldProxyDocument(document: string) {
-  const marker = "Markdown Content:";
-  const markerIndex = document.indexOf(marker);
-  let payload = markerIndex >= 0 ? document.slice(markerIndex + marker.length).trim() : document.trim();
-  if (payload.startsWith("```")) {
-    payload = payload.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
-  }
-  try {
-    const design = JSON.parse(payload) as unknown;
-    return isMakerWorldDesign(design) ? design : null;
-  } catch {
-    return null;
-  }
-}
-
 function describeFetchError(error: unknown) {
   if (error instanceof MakerWorldTimeoutError) return error.message;
   if (error instanceof Error) {
@@ -168,6 +164,13 @@ function describeFetchError(error: unknown) {
     return `${error.name}: ${error.message}${causeParts.length ? `（底层原因：${causeParts.join(" / ")}）` : ""}`;
   }
   return String(error);
+}
+
+function failureTypeFor(error: unknown): MakerWorldFetchAttempt["failureType"] {
+  if (error instanceof MakerWorldTimeoutError) return "timeout";
+  if (error instanceof MakerWorldResponseError) return error.failureType;
+  if (error instanceof Error && /internal error;\s*reference\s*=/i.test(error.message)) return "platform";
+  return "network";
 }
 
 async function runWithTimeout<T>(timeoutMs: number, operation: (signal: AbortSignal) => Promise<T>) {
@@ -196,15 +199,15 @@ async function fetchOfficialDesign(apiUrl: string, timeoutMs: number, fetcher: t
       const body = await response.text();
       const responseDetails = responseLog(response, body);
       if (!response.ok) {
-        throw new MakerWorldResponseError(`HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`, responseDetails);
+        throw new MakerWorldResponseError(`HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`, responseDetails, "http");
       }
       let design: unknown;
       try {
         design = JSON.parse(body) as unknown;
       } catch (error) {
-        throw new MakerWorldResponseError(`HTTP 200，但响应不是有效 JSON：${describeFetchError(error)}；Content-Type=${response.headers.get("content-type") || "未提供"}`, responseDetails, error);
+        throw new MakerWorldResponseError(`HTTP 200，但响应不是有效 JSON：${describeFetchError(error)}；Content-Type=${response.headers.get("content-type") || "未提供"}`, responseDetails, "payload", error);
       }
-      if (!isMakerWorldDesign(design)) throw new MakerWorldResponseError("HTTP 200 且 JSON 可解析，但缺少 instances 数组", responseDetails);
+      if (!isMakerWorldDesign(design)) throw new MakerWorldResponseError("HTTP 200 且 JSON 可解析，但缺少 instances 数组", responseDetails, "payload");
       return design;
     });
   } catch (error) {
@@ -213,52 +216,8 @@ async function fetchOfficialDesign(apiUrl: string, timeoutMs: number, fetcher: t
     const referenceId = reason.match(/reference\s*=\s*([a-z0-9_-]+)/i)?.[1];
     throw new MakerWorldAttemptError({
       source: "official",
+      failureType: failureTypeFor(error),
       url: apiUrl,
-      method: "GET",
-      requestHeaders,
-      startedAt,
-      finishedAt: new Date(finishedAtMs).toISOString(),
-      durationMs: finishedAtMs - startedAtMs,
-      timeoutMs,
-      reason,
-      ...(referenceId ? { referenceId } : {}),
-      error: serializeErrorForDiagnostics(error),
-      ...(error instanceof MakerWorldResponseError ? { response: error.response } : {}),
-    });
-  }
-}
-
-async function fetchProxyDesign(apiUrl: string, timeoutMs: number, fetcher: typeof fetch) {
-  // Cloudflare Workers can reject the otherwise valid api.bambulab.cn chain with
-  // "unable to get local issuer certificate". The proxy connection stays HTTPS;
-  // only its public upstream URL starts as HTTP and follows Bambu's own HTTPS redirect.
-  const proxyUpstreamUrl = apiUrl.startsWith("https://api.bambulab.cn/")
-    ? apiUrl.replace("https://", "http://")
-    : apiUrl;
-  const proxyUrl = `https://r.jina.ai/${proxyUpstreamUrl}`;
-  const startedAtMs = Date.now();
-  const startedAt = new Date(startedAtMs).toISOString();
-  const requestHeaders = { Accept: "text/plain" };
-  try {
-    return await runWithTimeout(timeoutMs, async (signal) => {
-      const response = await fetcher(proxyUrl, { headers: requestHeaders, signal });
-      const document = await response.text();
-      const responseDetails = responseLog(response, document);
-      if (!response.ok) {
-        throw new MakerWorldResponseError(`HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`, responseDetails);
-      }
-      const contentType = response.headers.get("content-type") || "未提供";
-      const design = parseMakerWorldProxyDocument(document);
-      if (!design) throw new MakerWorldResponseError(`HTTP 200，但响应无法解析为 MakerWorld JSON；Content-Type=${contentType}；响应长度=${document.length} 字符`, responseDetails);
-      return design;
-    });
-  } catch (error) {
-    const finishedAtMs = Date.now();
-    const reason = describeFetchError(error);
-    const referenceId = reason.match(/reference\s*=\s*([a-z0-9_-]+)/i)?.[1];
-    throw new MakerWorldAttemptError({
-      source: "proxy",
-      url: proxyUrl,
       method: "GET",
       requestHeaders,
       startedAt,
@@ -278,21 +237,14 @@ export async function fetchMakerWorldDesign(
   fetcher: typeof fetch = fetch,
   options: MakerWorldFetchOptions = {},
 ) {
-  const attempts = [
-    fetchOfficialDesign(apiUrl, options.officialTimeoutMs ?? 10000, fetcher),
-    fetchProxyDesign(apiUrl, options.proxyTimeoutMs ?? 22000, fetcher),
-  ];
   try {
-    return await Promise.any(attempts);
+    return await fetchOfficialDesign(apiUrl, options.officialTimeoutMs ?? 10000, fetcher);
   } catch (error) {
-    const failures = error instanceof AggregateError
-      ? error.errors.filter((failure): failure is MakerWorldAttemptError => failure instanceof MakerWorldAttemptError)
-      : [];
-    const details = failures.map((failure) => failure.attempt).sort((left, right) => left.source === "official" ? -1 : right.source === "official" ? 1 : 0);
-    if (details.length) throw new MakerWorldFetchError(details);
+    if (error instanceof MakerWorldAttemptError) throw new MakerWorldFetchError([error.attempt]);
     const now = new Date().toISOString();
     throw new MakerWorldFetchError([{
       source: "official",
+      failureType: failureTypeFor(error),
       url: apiUrl,
       method: "GET",
       requestHeaders: { Accept: "application/json" },

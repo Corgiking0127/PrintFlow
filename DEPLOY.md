@@ -9,7 +9,7 @@ PrintFlow 的推荐生产方式是把网页、API、D1 数据库和 X2D 云端 M
 - macOS、Linux、NAS 或长期运行的 PC
 - 国际区账号可访问 `api.bambulab.com:443` 和 `us.mqtt.bambulab.com:8883`
 - 中国区账号可访问 `api.bambulab.cn:443` 和 `cn.mqtt.bambulab.com:8883`
-- 主机可以通过 HTTPS `443` 访问 MakerWorld、`r.jina.ai`（结构化接口备用链路）与 Bark
+- 主机可以通过 HTTPS `443` 访问 MakerWorld 官方接口与 Bark
 - 局域网防火墙允许客户端访问 TCP `8082`
 - 不需要开放任何公网入站端口
 
